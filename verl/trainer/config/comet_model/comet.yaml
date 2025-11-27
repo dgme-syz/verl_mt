@@ -1,0 +1,16 @@
+enable: true
+n: 1
+val_batch_size: ${data.val_batch_size}
+ckpt_path: null
+tokenizer_path: ${actor_rollout_ref.model.path}
+model:
+  external_lib: ${actor_rollout_ref.model.external_lib}
+  fsdp_config:
+    min_num_params: 0
+    param_offload: false
+model_dict:
+  wmt23-cometkiwi-da-xl: Unbabel/wmt23-cometkiwi-da-xl
+# ppo_mini_batch_size: 128
+forward_micro_batch_size: 32
+ulysses_sequence_parallel_size: 1 # sp size
+use_dynamic_bsz: false
