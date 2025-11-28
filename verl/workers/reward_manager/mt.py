@@ -81,7 +81,7 @@ class MtTrainRewardManager(AbstractRewardManager):
             non_tensor = data_item.non_tensor_batch
             ground_truth = non_tensor["reward_model"]["ground_truth"]
             data_source = non_tensor[self.reward_fn_key]
-            translation_raw = non_tensor["response"][0] if non_tensor.get("response") else None
+            translation_raw = non_tensor["last_response"] if non_tensor.get("last_response") else None
             lg_pair = f"{non_tensor['extra_info']['src_lang']}-{non_tensor['extra_info']['tgt_lang']}"
 
             metric_scores = [

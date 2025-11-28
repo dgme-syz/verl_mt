@@ -78,7 +78,8 @@ while true; do
             actor_rollout_ref.rollout.n=${rollout_num} \
             actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=128 \
             actor_rollout_ref.ref.fsdp_config.param_offload=True \
-            reward_model.reward_manager="mt_train" \
+            ++reward_model.train_reward_manager="mt_train" \
+            ++reward_model.val_reward_manager="mt_val" \
             ++ray_kwargs.ray_init.ignore_reinit_error=True \
             custom_reward_function.reward_kwargs.mul_times=${mul_times} \
             trainer.val_before_train=False \

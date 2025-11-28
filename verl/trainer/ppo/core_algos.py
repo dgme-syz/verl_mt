@@ -266,6 +266,8 @@ def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
+    current_index: Optional[np.ndarray] = None,
+    depth: Optional[np.ndarray] = None,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
@@ -300,24 +302,59 @@ def compute_grpo_outcome_advantage(
     """
     scores = token_level_rewards.sum(dim=-1)
 
+    if depth is None:
+        depth = np.zeros_like(index)
+
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
 
     with torch.no_grad():
+        # calculate, and from deep to shallow
+        calculate_order = [i for i in range(len(index))]
+        # sort
+        calculate_order.sort(key=lambda x: (index[x], -depth[x]))
+        current_order = depth[calculate_order[0]]
+        current_pos = 0
+        max_depth = current_order
+        while current_order >= 0:
+            # gather current depth indices
+            current_depth_indices = []
+            while (
+                current_pos < len(calculate_order)
+                and depth[calculate_order[current_pos]] == current_order
+            ):
+                current_depth_indices.append(calculate_order[current_pos])
+                current_pos += 1
+            # compute mean and std for current depth
+            
+            bsz = len(current_depth_indices)
+            # add child scores
+            if depth[current_depth_indices[0]] < max_depth:
+                for i in range(bsz):
+                    child_idx = current_index[current_depth_indices[i]]
+                    if child_idx in id2mean:
+                        scores[current_depth_indices[i]] += id2mean[child_idx]
+                        # ensure depth = child depth - 1
+                        assert depth[current_depth_indices[i]] + 1 == depth[child_idx], \
+                            f"Depth mismatch: parent depth {depth[current_depth_indices[i]]}, child depth {depth[child_idx]}"
+                    else:
+                        raise ValueError(f"child idx {child_idx} not in id2mean")
+                    
+            for i in range(bsz):
+                id2score[index[current_depth_indices[i]]].append(scores[current_depth_indices[i]])
+            for idx in id2score:
+                if len(id2score[idx]) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                elif len(id2score[idx]) > 1:
+                    scores_tensor = torch.stack(id2score[idx])
+                    id2mean[idx] = torch.mean(scores_tensor)
+                    id2std[idx] = torch.std(scores_tensor)
+                else:
+                    raise ValueError(f"no score in prompt index: {idx}")
+
         bsz = scores.shape[0]
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                scores_tensor = torch.stack(id2score[idx])
-                id2mean[idx] = torch.mean(scores_tensor)
-                id2std[idx] = torch.std(scores_tensor)
-            else:
-                raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)

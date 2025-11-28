@@ -60,6 +60,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.multi_task.base import MTWorkflow
 
 
 @dataclass
@@ -236,6 +237,8 @@ def compute_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
+            current_index=data.non_tensor_batch.get("own_uid", None),
+            depth=data.non_tensor_batch.get("depth", None),
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
         data.batch["advantages"] = advantages
@@ -518,7 +521,8 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
+        #  "extra_info", "uid" need for workflow
+        reward_model_keys = set({"data_source", "reward_model"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -546,6 +550,7 @@ class RayPPOTrainer:
         sample_turns = []
         sample_uids = []
 
+        mt_workflow = MTWorkflow(self.config)
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -594,9 +599,11 @@ class RayPPOTrainer:
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+                mt_workflow.set(test_output_gen_batch_padded, self.actor_rollout_wg)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1)
             else:
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+                mt_workflow.set(test_output_gen_batch_padded, self.async_rollout_manager)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -1098,7 +1105,7 @@ class RayPPOTrainer:
             else False
         )
         next_step_profile = False
-
+        mt_workflow = MTWorkflow(self.config)
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1130,9 +1137,11 @@ class RayPPOTrainer:
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
+                            mt_workflow.set(gen_batch_output, self.actor_rollout_wg)
+                            gen_batch_output = mt_workflow.work()
                         else:
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            mt_workflow.set(gen_batch_output, self.async_rollout_manager)
+                            gen_batch_output = mt_workflow.work()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
@@ -1190,7 +1199,7 @@ class RayPPOTrainer:
                         # compute comet score
                         if self.use_comet:
                             if (n := self.config.comet_model.get("n", 0)) <= 0 or len(m_list := self.config.comet_model.get("model_dict", {}).items()) <= 0:
-                                raise ValueError(f"You wants to uase comet model as rm, but use n = {n}, and model_list = {m_list}")
+                                raise ValueError(f"You wants to use comet model as rm, but use n = {n}, and model_list = {m_list}")
                             for i in range(n):
                                 batch = batch.union(self.comet_wg_list[i].compute_comet_rm(batch))
 
