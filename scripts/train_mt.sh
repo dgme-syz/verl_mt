@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-train_batch_size=128
+train_batch_size=256
 rollout_num=8
+num_gpus=8
 datetime=$(date +%Y%m%d_%H%M%S)
 mul_times=1
 model_tag="Qwen3-4B-mix-data_17-20"
 # model_path="/home/nfs05/shenyz/translation/verl/bs@2_@20251118_211452/global_step_140/huggingface" # sft
-model_path="/home/nfs06/shenyz/models/Qwen3-4B"
-exp_name="bs@${train_batch_size}_n@${rollout_num}_m@${mul_times}_@${datetime}_@${model_tag}"
+model_path="/data/models/Qwen3-4B"
+exp_name="bs@${train_batch_size}_n@${rollout_num}_m@${mul_times}_@${datetime}_@${model_tag}_@${num_gpus}gpus"
 
-train_file_dir=/home/shenyz/recheck
+train_file_dir=/data/dataset/recheck
 #train_file_path="[$train_file_dir/Qwen3-0.6B_wmt24_en_zh.parquet,$train_file_dir/Qwen2.5-7B-Instruct_wmt24_en_zh.parquet,$train_file_dir/Qwen3-4B_wmt24_en_zh.parquet,$train_file_dir/Qwen3-0.6B_mixed_en_zh.parquet,$train_file_dir/Qwen2.5-7B-Instruct_mixed_en_zh.parquet,$train_file_dir/Qwen3-4B_mixed_en_zh.parquet]"
 #train_file_path="[$train_file_dir/Qwen3-0.6B_wmt24_en_zh.parquet,$train_file_dir/Qwen2.5-7B-Instruct_wmt24_en_zh.parquet,$train_file_dir/Qwen3-4B_wmt24_en_zh.parquet,$train_file_dir/wmt24_en-zh_CN.parquet]"
 # train_file_path=$train_file_dir/wmt24_en-zh_CN.parquet
@@ -33,16 +34,24 @@ check_free_gpus() {
     done
     echo "${free_gpus[@]}"
 }
-export TRANSFORMERS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=0
 export RAY_raylet_start_wait_time_s=120 
-export RAY_memory_monitor_refresh_ms=0
+# export RAY_memory_monitor_refresh_ms=0
 while true; do
     free_gpus=($(check_free_gpus))
-    if [ "${#free_gpus[@]}" -ge 4 ]; then
-        export CUDA_VISIBLE_DEVICES="${free_gpus[0]},${free_gpus[1]},${free_gpus[2]},${free_gpus[3]}"
-        echo $CUDA_VISIBLE_DEVICES
+    if [ "${#free_gpus[@]}" -ge $num_gpus ]; then
+        cuda_list=""
+        for ((i=0; i<num_gpus; i++)); do
+            if [ $i -eq 0 ]; then
+                cuda_list="${free_gpus[$i]}"
+            else
+                cuda_list="${cuda_list},${free_gpus[$i]}"
+            fi
+        done
+        export CUDA_VISIBLE_DEVICES="$cuda_list"
+        echo "Using GPUs: $CUDA_VISIBLE_DEVICES"
 
-        echo "检测到至少 4 张空闲 GPU: ${free_gpus[@]:0:4}, 启动训练..."
+        echo "检测到至少 $num_gpus 张空闲 GPU: ${free_gpus[@]:0:$num_gpus}, 启动训练..."
         python3 -m verl.trainer.main_ppo \
             algorithm.adv_estimator=grpo \
             data.train_files=$train_file_path \
@@ -53,8 +62,8 @@ while true; do
             actor_rollout_ref.model.path=$model_path \
             actor_rollout_ref.actor.optim.lr=5e-7 \
             actor_rollout_ref.model.use_remove_padding=True \
-            actor_rollout_ref.actor.ppo_mini_batch_size=32 \
-            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
             actor_rollout_ref.actor.use_kl_loss=False \
             actor_rollout_ref.actor.kl_loss_coef=0.01 \
             actor_rollout_ref.actor.entropy_coeff=0.0 \
@@ -62,12 +71,12 @@ while true; do
             actor_rollout_ref.model.enable_gradient_checkpointing=True \
             actor_rollout_ref.actor.fsdp_config.param_offload=True \
             actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
+            actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=128 \
             actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
             actor_rollout_ref.rollout.name=vllm \
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
             actor_rollout_ref.rollout.n=${rollout_num} \
-            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
+            actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=128 \
             actor_rollout_ref.ref.fsdp_config.param_offload=True \
             reward_model.reward_manager="mt_train" \
             ++ray_kwargs.ray_init.ignore_reinit_error=True \
@@ -76,7 +85,7 @@ while true; do
             trainer.logger="[console,wandb]" \
             trainer.project_name="ReCheck" \
             trainer.experiment_name="${exp_name}" \
-            trainer.n_gpus_per_node=4 \
+            trainer.n_gpus_per_node=$num_gpus \
             trainer.nnodes=1 \
             trainer.default_local_dir="${exp_name}" \
             trainer.default_hdfs_dir=null \
@@ -86,7 +95,7 @@ while true; do
         break
     else
 	echo "空闲GPU编号: ${free_gpus[@]}"
-        echo "空闲 GPU 不足 4 张，10 秒后重试..."
+        echo "空闲 GPU 不足 $num_gpus 张，10 秒后重试..."
         sleep 10
     fi
 done
