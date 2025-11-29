@@ -138,6 +138,7 @@ def load_reward_manager(
     # By default reward_manager is set to naive (NaiveRewardManager)
     if rw_name:
         reward_manager_name = rw_name
+        print(f"Using specified reward manager: {reward_manager_name}")
     else:
         reward_manager_name = config.reward_model.get("reward_manager", "naive")
     reward_manager_cls = get_reward_manager_cls(reward_manager_name)

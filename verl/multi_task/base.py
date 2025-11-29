@@ -2,14 +2,17 @@ from abc import ABC
 from typing import Any
 import re
 import uuid
-from copy import deepcopy
+import pickle
+import copy
 
 import numpy as np
+import torch
 
 from verl import DataProto
 from verl.utils.fs import copy_to_local
 from verl.utils import hf_tokenizer
-
+import verl.utils.torch_functional as verl_F
+from verl.utils.model import compute_position_id_with_mask
 
 
 class MutiTaskWorkflow(ABC):
@@ -53,9 +56,9 @@ class MTWorkflow(MutiTaskWorkflow):
         processed_str = solution_str
         # --- Remove all <think>...</think> blocks ---
         processed_str = re.sub(r"<think>.*?</think>", "", processed_str, flags=re.DOTALL).strip()
-        return processed_str
+        return processed_str if "<think>" not in processed_str else None
     
-    def recheck_prompt(target_lang: str, src_text: str, pred_text: str):
+    def recheck_prompt(self, target_lang: str, src_text: str, pred_text: str):
         if "zh" in target_lang:
             user_input = (
                 f"给定源文：'{src_text}'，和它的翻译草稿：'{pred_text}'"
@@ -98,7 +101,7 @@ class MTWorkflow(MutiTaskWorkflow):
         return [{"role": "user", "content": user_input}]
 
 
-    def work(self, repeat_times: int | None = None) -> DataProto:
+    def work(self, repeat_times: int | None = None, concat: bool = True) -> DataProto:
         if repeat_times is None:
             repeat_times = self.repeat_times
 
@@ -108,6 +111,10 @@ class MTWorkflow(MutiTaskWorkflow):
         ## 2.1 tokenize and prepare prompts_str
         rec_texts = []
         lst_texts = []
+        normal_idx = []
+        input_ids = []
+        attention_mask = []
+        position_ids = []
         for i in range(len(gen_batch_output)):
             data_item = gen_batch_output[i]
 
@@ -121,6 +128,13 @@ class MTWorkflow(MutiTaskWorkflow):
             sequences = valid_response_ids
             sequences_str = self.tokenizer.decode(sequences, skip_special_tokens=True)
             answer_str = self.extract_translation(sequences_str)
+            
+            if answer_str:
+                normal_idx.append(i)
+            else:
+                answer_str = "."
+                print(f"Warning: sample {i} has no extracted translation, set to default '.'")
+
             lst_texts.append(answer_str)
 
             src_text = data_item.non_tensor_batch['extra_info']['src']
@@ -129,20 +143,61 @@ class MTWorkflow(MutiTaskWorkflow):
             rec_text = self.tokenizer.apply_chat_template(
                 rec_text, add_generation_prompt=True, tokenize=False
             )
-            rec_texts.append(rec_text)
-        
+            if i == 0:
+                print(
+                    f"Preview:"
+                    f"answer_str:\n{answer_str}\n"
+                    f"source text:\n{src_text}\n"
+                    f"ReCheck prompt example:\n{rec_text}"  
+                )
+            rec_prompt = self.tokenizer(rec_text, return_tensors="pt", add_special_tokens=False)
+            
+            x, y = verl_F.postprocess_data(
+                input_ids=rec_prompt['input_ids'],
+                attention_mask=rec_prompt['attention_mask'],
+                max_length=self.config.data.get("max_prompt_length", 1024),
+                pad_token_id=self.tokenizer.pad_token_id,
+                left_pad=True,
+                truncation=self.config.data.get("truncation", "error")
+            )
+            z = compute_position_id_with_mask(y)
+            input_ids.append(x[0])
+            attention_mask.append(y[0])
+            position_ids.append(z[0])
+            
+        input_ids = torch.stack(input_ids, dim=0)
+        attention_mask = torch.stack(attention_mask, dim=0)
+        position_ids = torch.stack(position_ids, dim=0)
+
+        lst_texts = np.array(lst_texts, dtype=object)
         ## 2.2 batch_decode
-        rec_prompts = self.tokenizer(rec_texts, return_tensors='pt', padding=True)
-        assert 'input_ids' in rec_prompts and 'attention_mask' in rec_prompts and 'position_ids' in rec_prompts, \
-            "Tokenization of recheck prompts failed to produce necessary tensors."
+        print(
+            f"ReCheck input_ids shape: {input_ids.shape}\n"
+            f"Preview input_ids:\n{input_ids[0][:min(10, input_ids.shape[1])]}\n"
+            f"pad_token_id: {self.tokenizer.pad_token_id}\n"
+            f"Preview attention_mask:\n{attention_mask[0][:min(10, input_ids.shape[1])]}"
+        )
         
-        post_edit_batch_output = deepcopy(gen_batch_output)
+        # post_edit_batch_output = copy.deepcopy(gen_batch_output) # deepcopy
+        post_edit_batch_output = copy.deepcopy(gen_batch_output)
+        post_edit_batch_output.batch.pop('prompts')
+        post_edit_batch_output.batch.pop('responses')
         post_edit_batch_output.batch.update({
-            'prompts': rec_prompts['input_ids'],
-            'attention_mask': rec_prompts['attention_mask'],
-            'position_ids': rec_prompts['position_ids'],
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'position_ids': position_ids,
         })
+
+        print(
+            f"Before ReCheck, total batch size: {len(gen_batch_output.batch)}\n"
+            f"Preview:\n\n{gen_batch_output[[0, 1]]}\n\n"
+            f"Normal indices for ReCheck: {normal_idx}"
+        )
+
         post_edit_batch_output.non_tensor_batch.update({"last_response": lst_texts})
+        gen_batch_output.non_tensor_batch["last_response"] = np.array(
+            [None for _ in range(len(gen_batch_output.batch))], dtype=object
+        )
         post_edit_batch_output.non_tensor_batch["uid"] = np.array(
             [str(uuid.uuid4()) for _ in range(len(post_edit_batch_output.batch))], dtype=object
         )
@@ -154,17 +209,34 @@ class MTWorkflow(MutiTaskWorkflow):
             [1 for _ in range(len(gen_batch_output.batch))], dtype=np.int32
         )
         gen_batch_output.non_tensor_batch["own_uid"] = post_edit_batch_output.non_tensor_batch["uid"]
-        
+        # just use normal batch
+        post_edit_batch_output = post_edit_batch_output[normal_idx]
+
+        print(
+            f"After filtering, total batch size: {len(post_edit_batch_output.batch)}\n"
+            f"Preview:\n\n{post_edit_batch_output[[0, 1]]}"
+        )
+
         ## 2.3 repeat for post-edit generation
         post_edit_batch_output
         post_edit_batch_output = post_edit_batch_output.repeat(
             repeat_times=repeat_times, interleave=True
         )
+        post_edit_batch_output = self.actor_rollout_wg.generate_sequences(post_edit_batch_output)
+
         ### leaves do not need own_uid, set all -1
         post_edit_batch_output.non_tensor_batch["own_uid"] = np.array(
             ["-1" for _ in range(len(post_edit_batch_output.batch))], dtype=object
         )
-        gen_batch_output = gen_batch_output.union(post_edit_batch_output)
+        if concat:
+            gen_batch_output.meta_info.pop("timing")
+            gen_batch_output = DataProto.concat([gen_batch_output, post_edit_batch_output])
+        else:
+            gen_batch_output = post_edit_batch_output
+        print(
+            f"After ReCheck, total batch size: {len(gen_batch_output.batch)}"
+            f"Preview:\n\n{gen_batch_output[0]}"      
+        )
         return gen_batch_output
 
 

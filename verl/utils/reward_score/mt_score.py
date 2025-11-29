@@ -157,12 +157,12 @@ def compute_score_val_bleu(
     print("\n" + "=" * 80)
     print(" Processing Validation Sample ".center(80, "="))
 
-    answer_text, processed = extract_solution(solution_str)
+    answer_text = extract_solution(solution_str)
     print(f"\n[Prompt + Response]\n{solution_str}")
 
     bleu_score = compute_bleu(lang_pair, ground_truth, answer_text or "")
     print(f"Reference: {ground_truth}")
-    print(f"Hypothesis: {answer_text or processed}")
+    print(f"Hypothesis: {answer_text}")
 
     print("\n" + "-" * 80)
     print(f"BLEU Score: {bleu_score}")

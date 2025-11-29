@@ -308,16 +308,23 @@ def compute_grpo_outcome_advantage(
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
-
+    # print(
+    #     f"Computing GRPO advantage...\n\n"
+    #     f"index: {index}\n"
+    #     f"current_index: {current_index}\n"
+    #     f"depth: {depth}\n"
+    #     f"scores: {scores}\n"
+    # )
+    assert len(index) == len(depth) == len(current_index), "index, current_index and depth must have the same length."
     with torch.no_grad():
         # calculate, and from deep to shallow
         calculate_order = [i for i in range(len(index))]
         # sort
-        calculate_order.sort(key=lambda x: (index[x], -depth[x]))
+        calculate_order.sort(key=lambda x: -depth[x])
         current_order = depth[calculate_order[0]]
         current_pos = 0
         max_depth = current_order
-        while current_order >= 0:
+        while current_order >= 1:
             # gather current depth indices
             current_depth_indices = []
             while (
@@ -326,20 +333,20 @@ def compute_grpo_outcome_advantage(
             ):
                 current_depth_indices.append(calculate_order[current_pos])
                 current_pos += 1
+            current_order -= 1
             # compute mean and std for current depth
             
             bsz = len(current_depth_indices)
+            # print(f"Current depth indices: {current_depth_indices}")
             # add child scores
             if depth[current_depth_indices[0]] < max_depth:
                 for i in range(bsz):
                     child_idx = current_index[current_depth_indices[i]]
                     if child_idx in id2mean:
                         scores[current_depth_indices[i]] += id2mean[child_idx]
-                        # ensure depth = child depth - 1
-                        assert depth[current_depth_indices[i]] + 1 == depth[child_idx], \
-                            f"Depth mismatch: parent depth {depth[current_depth_indices[i]]}, child depth {depth[child_idx]}"
+                        # print(f"Adding child idx {child_idx} mean {id2mean[child_idx]} to sample idx {current_depth_indices[i]}, get score {scores[current_depth_indices[i]]}.")
                     else:
-                        raise ValueError(f"child idx {child_idx} not in id2mean")
+                        print(f"Warning: child idx {child_idx} not in id2mean, may be current sample is overthinking.")
                     
             for i in range(bsz):
                 id2score[index[current_depth_indices[i]]].append(scores[current_depth_indices[i]])

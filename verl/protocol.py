@@ -675,7 +675,14 @@ class DataProto:
 
         selected_non_tensor = {}
         for key, val in self.non_tensor_batch.items():
-            selected_non_tensor[key] = val[idxs_np]
+            try:
+                selected_non_tensor[key] = val[idxs_np]
+            except Exception as e:
+                print(f"Failed to index non_tensor_batch key '{key}' with indices of type {type(idxs_np)}")
+                raise RuntimeError(
+                    f"Failed to index non_tensor_batch key '{key}' with indices of type {type(idxs_np)}"
+                ) from e
+            
 
         return type(self)(batch=selected_batch, non_tensor_batch=selected_non_tensor, meta_info=self.meta_info)
 

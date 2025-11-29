@@ -32,9 +32,12 @@ class DataParallelCOMET(BaseCOMETModel):
         self.comet_model = comet_module 
         self.ulysses_sequence_parallel_size = self.config.get('ulysses_sequence_parallel_size', 1)
         self.tokenizer = tokenizer
-
-        
-        
+        print(self.config)
+        self.val_batch_size = self.config.get('val_batch_size')
+        if not self.val_batch_size:
+            self.val_batch_size = self.config.get("forward_micro_batch_size", 16)
+        print(f"dp_comet.py initialized with val_batch_size: {self.val_batch_size}")
+     
     def _forward_micro_batch(self, micro_batch):
         # response_length = micro_batch['responses'].size(-1)
 
@@ -124,19 +127,16 @@ class DataParallelCOMET(BaseCOMETModel):
             # decode
             sequences = valid_response_ids
             sequences_str = self.tokenizer.decode(sequences, skip_special_tokens=True)
-            answer_text, processed_str = self.extract_translation(sequences_str)
+            answer_text = self.extract_translation(sequences_str)
 
             src_text = data_item.non_tensor_batch['extra_info']['src']
             tgt_text = data_item.non_tensor_batch['reward_model']['ground_truth']
 
-            if answer_text:
-                new_item = {"src":src_text, "mt":answer_text, "ref":tgt_text}
-            else:
-                new_item = {"src":src_text, "mt":processed_str, "ref":tgt_text}
+            new_item = {"src":src_text, "mt":answer_text, "ref":tgt_text}
             triplet_list.append(new_item)
 
         # micro_batches = [triplet_list[i:i + micro_batch_size] for i in range(0, len(triplet_list), micro_batch_size)]
-        micro_batches = [triplet_list[i:i + self.config.val_batch_size] for i in range(0, len(triplet_list), self.config.val_batch_size)]
+        micro_batches = [triplet_list[i:i + self.val_batch_size] for i in range(0, len(triplet_list), self.val_batch_size)]
 
         values_lst = []
         for micro_batch in micro_batches:

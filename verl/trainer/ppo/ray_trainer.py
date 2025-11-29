@@ -522,7 +522,7 @@ class RayPPOTrainer:
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         #  "extra_info", "uid" need for workflow
-        reward_model_keys = set({"data_source", "reward_model"}) & batch.non_tensor_batch.keys()
+        reward_model_keys = set({"data_source"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -558,7 +558,8 @@ class RayPPOTrainer:
                 test_batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object
                 )
-
+            # preview test batch
+            print(f"Preview of test batch before generation:\n\n {test_batch[0]}")
             # repeat test batch
             test_batch = test_batch.repeat(
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
@@ -599,11 +600,13 @@ class RayPPOTrainer:
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             if not self.async_rollout_mode:
-                mt_workflow.set(test_output_gen_batch_padded, self.actor_rollout_wg)
-                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1)
+                print(f"Preview of padded test generation batch:\n\n {test_gen_batch_padded[0]}")
+                mt_workflow.set(test_gen_batch_padded, self.actor_rollout_wg)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False)
             else:
-                mt_workflow.set(test_output_gen_batch_padded, self.async_rollout_manager)
-                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1)
+                print(f"Preview of padded test generation batch:\n\n {test_gen_batch_padded[0]}")
+                mt_workflow.set(test_gen_batch_padded, self.async_rollout_manager)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -629,10 +632,10 @@ class RayPPOTrainer:
 
             if self.use_comet:
                 for i in range(len(self.comet_wg_list)):
-                    model_name = list(self.config.comet_model.model_dict().items())[i][0]
+                    model_name = list(self.config.comet_model.model_dict.items())[i][0]
                     comet_reward = self.comet_wg_list[i].compute_valid_comet(test_batch)
-                    comet_reward_tensor = comet_reward[f'{model_name}_valid'].batch
-                    comet_scores = comet_reward_tensor.sum(-1).cpu().to_list()
+                    comet_reward_tensor = comet_reward.batch[f'{model_name}_valid']
+                    comet_scores = comet_reward_tensor.sum(-1).cpu().tolist()
                     reward_extra_infos_dict[f'{model_name}_valid'].extend(comet_scores)
 
             if "reward_extra_info" in result:
@@ -1175,7 +1178,11 @@ class RayPPOTrainer:
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    n = (len(gen_batch_output.batch) + len(batch.batch) - 1) // len(batch.batch)
+                    
+                    batch = batch.repeat(repeat_times=n, interleave=True)
+                    if len(batch.batch) != len(gen_batch_output.batch):
+                        batch = batch.select(list(range(len(gen_batch_output.batch))))
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
