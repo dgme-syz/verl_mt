@@ -324,10 +324,10 @@ def compute_grpo_outcome_advantage(
         current_order = depth[calculate_order[0]]
         current_pos = 0
         max_depth = current_order
-        # make non leaf score = 0
+        # ensure non leaf score = 0
         for i in range(len(scores)):
             if depth[i] < max_depth:
-                scores[i] = torch.tensor(0.0, device=scores.device)
+                assert torch.equal(scores[i], torch.tensor(0.0)), f"Non-leaf node should have zero reward, but got {scores[i]} at index {i}."
 
         while current_order >= 1:
             # gather current depth indices

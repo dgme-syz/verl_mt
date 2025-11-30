@@ -61,7 +61,7 @@ class MTWorkflow(MultiTaskWorkflow):
         """
         # --- Remove all <think>...</think> blocks ---
         processed_str = re.sub(r"<think>.*?</think>", "", solution_str, flags=re.DOTALL).strip()
-        return processed_str if "<think>" not in solution_str else None
+        return processed_str if "<think>" not in processed_str else None
 
     @staticmethod
     def _build_recheck_prompt(target_lang: str, src_text: str, pred_text: str) -> List[Dict[str, str]]:
@@ -135,7 +135,7 @@ class MTWorkflow(MultiTaskWorkflow):
                 valid_indices.append(i)
             else:
                 answer_str = "null"
-                print(f"Warning: sample {i} has no extracted translation, set to default 'null'")
+                print(f"Warning: sample {i: } {sequences_str} \n has no extracted translation, set to default 'null'")
             last_responses.append(answer_str)
 
             src_text = data_item.non_tensor_batch["extra_info"]["src"]
@@ -193,6 +193,7 @@ class MTWorkflow(MultiTaskWorkflow):
         recheck_attn_mask: torch.Tensor,
         recheck_pos_ids: torch.Tensor,
         last_responses: List[str],
+        uuid,
     ) -> DataProto:
         """Constructs the DataProto object for the post-editing generation step."""
         # Use shallow copy for efficiency, as we are only modifying top-level dicts
@@ -211,8 +212,8 @@ class MTWorkflow(MultiTaskWorkflow):
         batch_size = len(recheck_input_ids)
         post_edit_batch.non_tensor_batch.update({
             "last_response": np.array(last_responses, dtype=object),
-            "uid": np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object),
-            "depth": np.full(batch_size, 2, dtype=np.int32),
+            "uid": uuid,
+            "depth": np.full(batch_size, 2, dtype=np.int32)
         })
         return post_edit_batch
 
@@ -222,7 +223,7 @@ class MTWorkflow(MultiTaskWorkflow):
 
         # 1. Initial Generation (MT)
         gen_batch_output = self.actor_rollout_wg.generate_sequences(self.gen_batch_output)
-
+        gen_batch_output.non_tensor_batch["own_uid"] = np.array([str(uuid.uuid4()) for _ in range(len(gen_batch_output.batch))], dtype=object)
         # 2. Prepare for Post-Editing Step
         (
             recheck_input_ids,
@@ -234,7 +235,8 @@ class MTWorkflow(MultiTaskWorkflow):
 
         if not test:
             valid_indices = self._align_batch_for_dp(valid_indices, repeat_times)
-
+        else:
+            valid_indices = list(range(len(recheck_input_ids)))
         # Filter all inputs based on valid indices
         recheck_input_ids = recheck_input_ids[valid_indices]
         recheck_attn_mask = recheck_attn_mask[valid_indices]
@@ -248,11 +250,11 @@ class MTWorkflow(MultiTaskWorkflow):
             recheck_attn_mask=recheck_attn_mask,
             recheck_pos_ids=recheck_pos_ids,
             last_responses=filtered_last_responses,
+            uuid=gen_batch_output.non_tensor_batch["own_uid"][valid_indices]
         )
 
         # Set metadata for the original generation batch
         gen_batch_output.non_tensor_batch["depth"] = np.ones(len(gen_batch_output.batch), dtype=np.int32)
-        gen_batch_output.non_tensor_batch["own_uid"] = post_edit_batch.non_tensor_batch["uid"]
         gen_batch_output.non_tensor_batch["last_response"] = np.full(len(gen_batch_output.batch), None, dtype=object)
 
         print(f"Post-edit batch size (before repeat): {len(post_edit_batch.batch)}")
@@ -271,6 +273,7 @@ class MTWorkflow(MultiTaskWorkflow):
 
         print(f"Final combined batch size: {len(final_output.batch)}")
         return final_output
+
 
 
 
