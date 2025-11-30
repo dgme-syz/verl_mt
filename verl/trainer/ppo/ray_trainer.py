@@ -602,11 +602,11 @@ class RayPPOTrainer:
             if not self.async_rollout_mode:
                 print(f"Preview of padded test generation batch:\n\n {test_gen_batch_padded[0]}")
                 mt_workflow.set(test_gen_batch_padded, self.actor_rollout_wg)
-                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True)
             else:
                 print(f"Preview of padded test generation batch:\n\n {test_gen_batch_padded[0]}")
                 mt_workflow.set(test_gen_batch_padded, self.async_rollout_manager)
-                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -1182,7 +1182,7 @@ class RayPPOTrainer:
                     
                     batch = batch.repeat(repeat_times=n, interleave=True)
                     if len(batch.batch) != len(gen_batch_output.batch):
-                        batch = batch.select(list(range(len(gen_batch_output.batch))))
+                        batch = batch[list(range(len(gen_batch_output.batch)))]
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():

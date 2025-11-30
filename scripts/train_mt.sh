@@ -58,7 +58,6 @@ while true; do
             data.val_files=$test_file_path \
             data.train_batch_size=$train_batch_size \
             data.max_prompt_length=2048 \
-            data.val_max_samples=4 \
             data.max_response_length=4096 \
             actor_rollout_ref.model.path=$model_path \
             actor_rollout_ref.actor.optim.lr=5e-7 \
