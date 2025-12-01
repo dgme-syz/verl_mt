@@ -176,8 +176,8 @@ class MtValRewardManager(AbstractRewardManager):
         reward_extra_info = defaultdict(list)
         printed_data_sources: dict[str, int] = {}
 
-        sol = []
-        rep = []
+        sol = defaultdict(list)
+        ref = defaultdict(list)
 
         global_lang_pair = None
         for i, data_item in enumerate(data):
@@ -203,8 +203,8 @@ class MtValRewardManager(AbstractRewardManager):
             if global_lang_pair is None:
                 global_lang_pair = lg_pair
 
-            sol.append(ground_truth)
-            rep.append(response_str)
+            sol[data_source].append(response_str)
+            ref[data_source].append(ground_truth)
 
             score = self.compute_score(
                 solution_str=response_str,
@@ -237,13 +237,16 @@ class MtValRewardManager(AbstractRewardManager):
 
         # Compute corpus-level BLEU if applicable
         if self.compute_corpus_bleu is not None and global_lang_pair is not None:
-            corpus_bleu_score = self.compute_corpus_bleu(
-                solution_str=sol,
-                ground_truth=rep,
-                lang_pair=global_lang_pair
-            )
-            reward_extra_info["corpus_bleu_score"] = [corpus_bleu_score] # make it a list
-            print("[corpus_bleu_score]", corpus_bleu_score)
+            for data_source in sol.keys():
+                sol_list = sol[data_source]
+                ref_list = ref[data_source]
+                corpus_bleu_score = self.compute_corpus_bleu(
+                    solution_str=sol_list,
+                    ground_truth=ref_list,
+                    lang_pair=global_lang_pair
+                )
+                reward_extra_info[f"corpus_bleu_{data_source}"] = [corpus_bleu_score] * len(data.batch)
+                print(f"[corpus_bleu_score - {data_source}]", corpus_bleu_score)
 
         return (
             {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}

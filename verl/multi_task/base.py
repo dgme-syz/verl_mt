@@ -173,7 +173,7 @@ class MTWorkflow(MultiTaskWorkflow):
 
     def _align_batch_for_dp(self, indices: List[int], repeat_times: int) -> List[int]:
         """Aligns the batch of indices to be divisible by the data-parallel world size."""
-        dp_world_size = self.config.trainer.n_gpus_per_node
+        dp_world_size = self.actor_rollout_wg.world_size
         if dp_world_size <= 0:
             return indices
 
@@ -236,7 +236,7 @@ class MTWorkflow(MultiTaskWorkflow):
         if not test:
             valid_indices = self._align_batch_for_dp(valid_indices, repeat_times)
         else:
-            valid_indices = list(range(len(recheck_input_ids)))
+            valid_indices = list(range(len(recheck_input_ids))) # auto pad
         # Filter all inputs based on valid indices
         recheck_input_ids = recheck_input_ids[valid_indices]
         recheck_attn_mask = recheck_attn_mask[valid_indices]
@@ -258,6 +258,7 @@ class MTWorkflow(MultiTaskWorkflow):
         gen_batch_output.non_tensor_batch["last_response"] = np.full(len(gen_batch_output.batch), None, dtype=object)
 
         print(f"Post-edit batch size (before repeat): {len(post_edit_batch.batch)}")
+        print(f"Preview of post-editing:\n{gen_batch_output[:2]}")
         
         # 3. Post-Editing Generation
         post_edit_batch = post_edit_batch.repeat(repeat_times=repeat_times, interleave=True)
@@ -273,7 +274,6 @@ class MTWorkflow(MultiTaskWorkflow):
 
         print(f"Final combined batch size: {len(final_output.batch)}")
         return final_output
-
 
 
 

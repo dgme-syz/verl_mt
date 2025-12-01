@@ -11,7 +11,6 @@ def compute_bleu(lang_pair: str, reference: str, prediction: str) -> float:
     bleu = sacrebleu.corpus_bleu([prediction], [[reference]], tokenize=tokenize)
     bleu_score = bleu.score
 
-    print(f"[BLEU Score] {bleu_score:.2f}")
     return bleu_score
 
 
@@ -21,7 +20,7 @@ def extract_solution(text: str) -> str:
     Removes <think>...</think> blocks if present.
     """
     processed = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return processed
+    return processed.strip()
 
 
 def validate_response_structure(response: str) -> bool:
@@ -154,18 +153,10 @@ def compute_score_val_bleu(
     lang_pair: str,
 ) -> float:
     """Compute BLEU score for validation samples (without reward logic)."""
-    print("\n" + "=" * 80)
-    print(" Processing Validation Sample ".center(80, "="))
 
     answer_text = extract_solution(solution_str)
-    print(f"\n[Prompt + Response]\n{solution_str}")
 
     bleu_score = compute_bleu(lang_pair, ground_truth, answer_text or "")
-    print(f"Reference: {ground_truth}")
-    print(f"Hypothesis: {answer_text}")
-
-    print("\n" + "-" * 80)
-    print(f"BLEU Score: {bleu_score}")
     return bleu_score
 
 def compute_score_corpus_bleu(
@@ -189,6 +180,9 @@ def compute_score_corpus_bleu(
     print(
         f"Preview of responses and references:\nResponse: {solution_str[0]}\nReference: {ground_truth[0]}"
     )
+    solution_str = [extract_solution(x) for x in solution_str]
+    if any(x.startswith("<think>") for x in solution_str):
+        print("Warning: Some responses still contain <think> tags after extraction.")
     result = sacrebleu.corpus_bleu(
         solution_str,
         [ground_truth],

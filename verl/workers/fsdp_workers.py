@@ -1907,6 +1907,14 @@ class COMETWorker(Worker):
             )
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+         # create training dispatch
+        if self.ulysses_device_mesh is not None:
+            is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
+            self._register_dispatch_collect_info(
+                "comet_rewrad", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+        else:
+            self._register_dispatch_collect_info("comet_rewrad", dp_rank=self.rank, is_collect=True)
 
         # normalize config
         self.config.forward_micro_batch_size //= (self.ulysses_sequence_parallel_size)
@@ -1935,7 +1943,7 @@ class COMETWorker(Worker):
 
         torch.cuda.empty_cache()
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="comet_rewrad"))
     def compute_comet_rm(self, data: DataProto):
 
         data = data.to('cuda')
@@ -1953,7 +1961,7 @@ class COMETWorker(Worker):
         torch.cuda.empty_cache()
         return output
 
-    @register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="comet_rewrad"))
     def compute_valid_comet(self, data: DataProto):
 
         data = data.to('cuda')
@@ -1970,6 +1978,8 @@ class COMETWorker(Worker):
 
         torch.cuda.empty_cache()
         return output
+
+    
 
 
 # ================================= Async related workers =================================

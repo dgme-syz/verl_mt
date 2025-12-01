@@ -310,10 +310,12 @@ def compute_grpo_outcome_advantage(
     id2std = {}
     print(
         f"Computing GRPO advantage...\n\n"
-        f"index: {index}\n"
-        f"current_index: {current_index}\n"
-        f"depth: {depth}\n"
-        f"scores: {scores}\n"
+        f"index: {index[:10]}\n"
+        f"current_index: {current_index[:10]}\n"
+        f"depth: {depth[:10]}\n"
+        f"scores: {scores[:10]}\n"
+        f"scores[0]: {scores[0]}\n"
+        f"check non zero {sum([not torch.eq(scores[i], 0) for i in range(len(index))])}/{len(index)}\n"
     )
     assert len(index) == len(depth) == len(current_index), "index, current_index and depth must have the same length."
     with torch.no_grad():

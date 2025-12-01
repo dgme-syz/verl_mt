@@ -6,7 +6,7 @@ rollout_num=4
 num_gpus=8
 datetime=$(date +%Y%m%d_%H%M%S)
 mul_times=1
-model_tag="Qwen3-4B-mix-plus-data_17-20"
+model_tag="Qwen3-4B-mix-plus-added-data_17-20"
 # model_path="/home/nfs05/shenyz/translation/verl/bs@2_@20251118_211452/global_step_140/huggingface" # sft
 model_path="/data/models/Qwen3-4B"
 exp_name="bs@${train_batch_size}_n@${rollout_num}_m@${mul_times}_@${datetime}_@${model_tag}_@${num_gpus}gpus"
@@ -59,7 +59,7 @@ while true; do
             data.train_batch_size=$train_batch_size \
             data.max_prompt_length=2048 \
             data.max_response_length=4096 \
-            ++data.apply_chat_template_kwargs.enable_thinking=False \
+            ++data.apply_chat_template_kwargs.enable_thinking=True \
             actor_rollout_ref.model.path=$model_path \
             actor_rollout_ref.actor.optim.lr=1e-6 \
             actor_rollout_ref.model.use_remove_padding=True \

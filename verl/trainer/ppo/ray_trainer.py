@@ -521,12 +521,9 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        #  "extra_info", "uid" need for workflow
-        reward_model_keys = set({"data_source"}) & batch.non_tensor_batch.keys()
-
         # pop those keys for generation
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
+        non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) 
         gen_batch = batch.pop(
             batch_keys=batch_keys_to_pop,
             non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
@@ -560,6 +557,7 @@ class RayPPOTrainer:
                 )
             # preview test batch
             print(f"Preview of test batch before generation:\n\n {test_batch[0]}")
+            print(f"length of test batch: {len(test_batch)}")
             # repeat test batch
             test_batch = test_batch.repeat(
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
@@ -609,8 +607,16 @@ class RayPPOTrainer:
                 test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True)
 
             # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+            if self.use_comet:
+                for i in range(len(self.comet_wg_list)):
+                    model_name = list(self.config.comet_model.model_dict.items())[i][0]
+                    comet_reward = self.comet_wg_list[i].compute_valid_comet(test_output_gen_batch_padded)
+                    comet_reward = unpad_dataproto(comet_reward, pad_size=pad_size)
+                    comet_reward_tensor = comet_reward.batch[f'{model_name}_valid']
+                    comet_scores = comet_reward_tensor.sum(-1).cpu().tolist()
+                    reward_extra_infos_dict[f'{model_name}_valid'].extend(comet_scores)
 
+            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
             print("validation generation end")
 
             # Store generated outputs
@@ -630,13 +636,6 @@ class RayPPOTrainer:
             sample_scores.extend(scores)
             reward_extra_infos_dict["reward"].extend(scores)
 
-            if self.use_comet:
-                for i in range(len(self.comet_wg_list)):
-                    model_name = list(self.config.comet_model.model_dict.items())[i][0]
-                    comet_reward = self.comet_wg_list[i].compute_valid_comet(test_batch)
-                    comet_reward_tensor = comet_reward.batch[f'{model_name}_valid']
-                    comet_scores = comet_reward_tensor.sum(-1).cpu().tolist()
-                    reward_extra_infos_dict[f'{model_name}_valid'].extend(comet_scores)
 
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
