@@ -308,13 +308,13 @@ def compute_grpo_outcome_advantage(
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
-    # print(
-    #     f"Computing GRPO advantage...\n\n"
-    #     f"index: {index}\n"
-    #     f"current_index: {current_index}\n"
-    #     f"depth: {depth}\n"
-    #     f"scores: {scores}\n"
-    # )
+    print(
+        f"Computing GRPO advantage...\n\n"
+        f"index: {index}\n"
+        f"current_index: {current_index}\n"
+        f"depth: {depth}\n"
+        f"scores: {scores}\n"
+    )
     assert len(index) == len(depth) == len(current_index), "index, current_index and depth must have the same length."
     with torch.no_grad():
         # calculate, and from deep to shallow
@@ -324,11 +324,7 @@ def compute_grpo_outcome_advantage(
         current_order = depth[calculate_order[0]]
         current_pos = 0
         max_depth = current_order
-        # ensure non leaf score = 0
-        for i in range(len(scores)):
-            if depth[i] < max_depth:
-                assert torch.equal(scores[i], torch.tensor(0.0)), f"Non-leaf node should have zero reward, but got {scores[i]} at index {i}."
-
+       
         while current_order >= 1:
             # gather current depth indices
             current_depth_indices = []

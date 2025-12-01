@@ -167,3 +167,32 @@ def compute_score_val_bleu(
     print("\n" + "-" * 80)
     print(f"BLEU Score: {bleu_score}")
     return bleu_score
+
+def compute_score_corpus_bleu(
+    solution_str: list[str],
+    ground_truth: list[str],
+    lang_pair: str
+) -> float:
+    assert len(solution_str) == len(ground_truth), (
+        "The number of translations should be equal to the number of references"
+    )
+    _, tgt_lang = lang_pair.split("-")
+    # Choose tokenizer based on target language
+    if tgt_lang == "zh":
+        tokenizer = "zh"
+    elif tgt_lang == "ja":
+        tokenizer = "ja-mecab"
+    elif tgt_lang == "ko":
+        tokenizer = "ko-mecab"
+    else:
+        tokenizer = "13a"
+    print(
+        f"Preview of responses and references:\nResponse: {solution_str[0]}\nReference: {ground_truth[0]}"
+    )
+    result = sacrebleu.corpus_bleu(
+        solution_str,
+        [ground_truth],
+        tokenize=tokenizer,
+        force=True,
+    )
+    return result.score

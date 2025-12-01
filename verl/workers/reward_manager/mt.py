@@ -19,7 +19,7 @@ import torch
 from verl import DataProto
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
-from verl.utils.reward_score.mt_score import compute_score_val_bleu
+from verl.utils.reward_score.mt_score import compute_score_val_bleu, compute_score_corpus_bleu
 
 @register("mt_train")
 class MtTrainRewardManager(AbstractRewardManager):
@@ -64,15 +64,15 @@ class MtTrainRewardManager(AbstractRewardManager):
         for i, data_item in enumerate(data):
             # --- Decode tokens ---
 
-            own_uuid = data_item.non_tensor_batch["own_uuid"]
-            if own_uuid != "-1":
-                prompt_ids = data_item.batch["prompts"]
-                response_ids = data_item.batch["responses"]
-                attn_mask = data_item.batch["attention_mask"]
+            own_uuid = data_item.non_tensor_batch["own_uid"]
+            prompt_ids = data_item.batch["prompts"]
+            response_ids = data_item.batch["responses"]
+            attn_mask = data_item.batch["attention_mask"]
 
-                prompt_len = prompt_ids.shape[-1]
-                valid_prompt_len = int(attn_mask[:prompt_len].sum())
-                valid_response_len = int(attn_mask[prompt_len:].sum())
+            prompt_len = prompt_ids.shape[-1]
+            valid_prompt_len = int(attn_mask[:prompt_len].sum())
+            valid_response_len = int(attn_mask[prompt_len:].sum())
+            if own_uuid == "-1":
 
                 prompt_str = self.tokenizer.decode(
                     prompt_ids[-valid_prompt_len:], skip_special_tokens=True
@@ -158,6 +158,7 @@ class MtValRewardManager(AbstractRewardManager):
         # if rewardmanager can use settings from config, it is easy
         # now we use custom func args to control score caclulation's params in training
         self.compute_score = compute_score_val_bleu 
+        self.compute_corpus_bleu = compute_score_corpus_bleu
         self.reward_fn_key = reward_fn_key
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
@@ -175,6 +176,10 @@ class MtValRewardManager(AbstractRewardManager):
         reward_extra_info = defaultdict(list)
         printed_data_sources: dict[str, int] = {}
 
+        sol = []
+        rep = []
+
+        global_lang_pair = None
         for i, data_item in enumerate(data):
             prompt_ids = data_item.batch["prompts"]
             response_ids = data_item.batch["responses"]
@@ -195,6 +200,11 @@ class MtValRewardManager(AbstractRewardManager):
             ground_truth = non_tensor["reward_model"]["ground_truth"]
             data_source = non_tensor[self.reward_fn_key]
             lg_pair = f"{non_tensor['extra_info']['src_lang']}-{non_tensor['extra_info']['tgt_lang']}"
+            if global_lang_pair is None:
+                global_lang_pair = lg_pair
+
+            sol.append(ground_truth)
+            rep.append(response_str)
 
             score = self.compute_score(
                 solution_str=response_str,
@@ -224,6 +234,16 @@ class MtValRewardManager(AbstractRewardManager):
                 print("[ground_truth]", ground_truth)
                 for key, value in score.items():
                     print(f"[{key}]", value)
+
+        # Compute corpus-level BLEU if applicable
+        if self.compute_corpus_bleu is not None and global_lang_pair is not None:
+            corpus_bleu_score = self.compute_corpus_bleu(
+                solution_str=sol,
+                ground_truth=rep,
+                lang_pair=global_lang_pair
+            )
+            reward_extra_info["corpus_bleu_score"] = [corpus_bleu_score] # make it a list
+            print("[corpus_bleu_score]", corpus_bleu_score)
 
         return (
             {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
