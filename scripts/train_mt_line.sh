@@ -2,7 +2,7 @@
 set -euo pipefail
 
 train_batch_size=128
-rollout_num=16
+rollout_num=10
 num_gpus=4
 datetime=$(date +%Y%m%d_%H%M%S)
 mul_times=1

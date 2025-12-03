@@ -51,6 +51,7 @@ def validate_response_structure(response: str) -> bool:
         validation_passed = False
     else:
         print("  Tag sequence order: OK")
+        pass
 
     print("=" * 60 + "\n")
     return validation_passed
@@ -84,13 +85,12 @@ def compute_score(
         print("[INFO] Stage 1 sample (no raw translation available).")
     else:
         min_score = min(metric_scores) if metric_scores else None
-        print(f"[Answer]        {answer_text}")
-        print(f"[Last Output]   {translation_raw}")
-        print(f"[Min Comet]     {min_score}")
-        print(f"[Answer==Raw]   {answer_text == translation_raw}")
-        print(f"[Length]        answer={len(answer_text)}, raw={len(translation_raw)}")
-
         if answer_text == translation_raw and min_score < 82:
+            print(f"[Answer]        {answer_text}")
+            print(f"[Last Output]   {translation_raw}")
+            print(f"[Min Comet]     {min_score}")
+            print(f"[Answer==Raw]   {answer_text == translation_raw}")
+            print(f"[Length]        answer={len(answer_text)}, raw={len(translation_raw)}")
             print("[INFO] Low-quality duplicate, giving 0.0 score.")
             return 0.0
     print("-" * 60 + "\n")
@@ -102,6 +102,11 @@ def compute_score(
 
     if not (format_correct and answer_text):
         print("[Content Validation] Skipped due to format error or empty answer.")
+        print(
+            f"[ERROR]-----details\n"
+            f"[prompt_str + solution_str]: {prompt_str + solution_str}\n"
+            f"[response]: {solution_str}\n"
+        )
         return 0.0
 
     # Compute BLEU score
@@ -142,7 +147,6 @@ def compute_score(
     print(f"  Answer Score : {answer_score:.4f}")
     print(f"  Total Score  : {total_score:.4f}")
     print("-" * 60 + "\n")
-
     return total_score
 
 

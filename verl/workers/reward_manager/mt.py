@@ -64,7 +64,6 @@ class MtTrainRewardManager(AbstractRewardManager):
         for i, data_item in enumerate(data):
             # --- Decode tokens ---
 
-            own_uuid = data_item.non_tensor_batch["own_uid"]
             prompt_ids = data_item.batch["prompts"]
             response_ids = data_item.batch["responses"]
             attn_mask = data_item.batch["attention_mask"]
@@ -72,47 +71,44 @@ class MtTrainRewardManager(AbstractRewardManager):
             prompt_len = prompt_ids.shape[-1]
             valid_prompt_len = int(attn_mask[:prompt_len].sum())
             valid_response_len = int(attn_mask[prompt_len:].sum())
-            if own_uuid == "-1":
 
-                prompt_str = self.tokenizer.decode(
-                    prompt_ids[-valid_prompt_len:], skip_special_tokens=True
-                )
-                response_str = self.tokenizer.decode(
-                    response_ids[:valid_response_len], skip_special_tokens=True
-                )
+            prompt_str = self.tokenizer.decode(
+                prompt_ids[-valid_prompt_len:], skip_special_tokens=True
+            )
+            response_str = self.tokenizer.decode(
+                response_ids[:valid_response_len], skip_special_tokens=True
+            )
 
-                non_tensor = data_item.non_tensor_batch
-                ground_truth = non_tensor["reward_model"]["ground_truth"]
-                data_source = non_tensor[self.reward_fn_key]
-                translation_raw = non_tensor["last_response"] if non_tensor.get("last_response", None) else None
-                lg_pair = f"{non_tensor['extra_info']['src_lang']}-{non_tensor['extra_info']['tgt_lang']}"
+            non_tensor = data_item.non_tensor_batch
+            ground_truth = non_tensor["reward_model"]["ground_truth"]
+            data_source = non_tensor[self.reward_fn_key]
+            translation_raw = non_tensor["last_response"] if non_tensor.get("last_response", None) else None
+            lg_pair = f"{non_tensor['extra_info']['src_lang']}-{non_tensor['extra_info']['tgt_lang']}"
 
-                metric_scores = [
-                    float(v) for k, v in data_item.batch.items() if k.endswith("_comet_score")
-                ]
+            metric_scores = [
+                float(v) for k, v in data_item.batch.items() if k.endswith("_comet_score")
+            ]
 
-                # --- Compute reward ---
-                score = self.compute_score(
-                    metric_scores=metric_scores,
-                    lang_pair=lg_pair,
-                    prompt_str=prompt_str,
-                    solution_str=response_str,
-                    ground_truth=ground_truth,
-                    translation_raw=translation_raw
-                )
-                printed_data_sources.setdefault(data_source, 0)
-                if printed_data_sources[data_source] < self.num_examine:
-                    printed_data_sources[data_source] += 1
-                    print("[prompt]", prompt_str)
-                    print("[response]", response_str)
-                    print("[ground_truth]", ground_truth)
-                    if isinstance(score, dict):
-                        for key, value in score.items():
-                            print(f"[{key}]", value)
-                    else:
-                        print("[score]", score)
-            else:
-                score = 0.0
+            # --- Compute reward ---
+            score = self.compute_score(
+                metric_scores=metric_scores,
+                lang_pair=lg_pair,
+                prompt_str=prompt_str,
+                solution_str=response_str,
+                ground_truth=ground_truth,
+                translation_raw=translation_raw
+            )
+            printed_data_sources.setdefault(data_source, 0)
+            if printed_data_sources[data_source] < self.num_examine:
+                printed_data_sources[data_source] += 1
+                print("[prompt]", prompt_str)
+                print("[response]", response_str)
+                print("[ground_truth]", ground_truth)
+                if isinstance(score, dict):
+                    for key, value in score.items():
+                        print(f"[{key}]", value)
+                else:
+                    print("[score]", score)
 
             if isinstance(score, dict):
                 reward = score.get("score", 0.0)
@@ -122,7 +118,6 @@ class MtTrainRewardManager(AbstractRewardManager):
                 reward = score
 
             reward_tensor[i, valid_response_len - 1] = reward
-
         return (
             {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
             if return_dict

@@ -205,9 +205,9 @@ class MTWorkflow(MultiTaskWorkflow):
     ) -> DataProto:
         """Constructs the DataProto object for the post-editing generation step."""
         # Use shallow copy for efficiency, as we are only modifying top-level dicts
-        post_edit_batch = copy.copy(original_batch)
-        post_edit_batch.batch = copy.copy(original_batch.batch)
-        post_edit_batch.non_tensor_batch = copy.copy(original_batch.non_tensor_batch)
+        post_edit_batch = copy.deepcopy(original_batch)
+        post_edit_batch.batch = original_batch.batch.detach().clone()
+        post_edit_batch.non_tensor_batch = copy.deepcopy(original_batch.non_tensor_batch)
 
         post_edit_batch.batch.pop("prompts")
         post_edit_batch.batch.pop("responses")
