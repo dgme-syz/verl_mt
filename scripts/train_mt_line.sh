@@ -2,11 +2,11 @@
 set -euo pipefail
 
 train_batch_size=128
-rollout_num=4
+rollout_num=16
 num_gpus=4
 datetime=$(date +%Y%m%d_%H%M%S)
 mul_times=1
-model_tag="Qwen3-4B-mix-plus-added-data_17-20-tree"
+model_tag="Qwen3-4B-mix-plus-added-data_17-20-line"
 # model_path="/home/nfs05/shenyz/translation/verl/bs@2_@20251118_211452/global_step_140/huggingface" # sft
 model_path="/data/models/Qwen3-4B"
 exp_name="bs@${train_batch_size}_n@${rollout_num}_m@${mul_times}_@${datetime}_@${model_tag}_@${num_gpus}gpus"
@@ -88,7 +88,7 @@ while true; do
             ++reward_model.train_reward_manager="mt_train" \
             ++reward_model.val_reward_manager="mt_val" \
             ++ray_kwargs.ray_init.ignore_reinit_error=True \
-            ++workflow.repeat_times=4 \
+            ++workflow.repeat_times=1 \
             ++workflow.tokenizer_path=$model_path \
             custom_reward_function.reward_kwargs.mul_times=${mul_times} \
             trainer.val_before_train=True \

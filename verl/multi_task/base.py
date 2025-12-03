@@ -131,25 +131,33 @@ class MTWorkflow(MultiTaskWorkflow):
             sequences_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             answer_str = self._extract_translation(sequences_str)
 
-            if answer_str:
+            if answer_str and valid_response_length < self.max_prompt_length:
                 valid_indices.append(i)
             else:
                 answer_str = "null"
-                print(f"Warning: sample {i: } {sequences_str} \n has no extracted translation, set to default 'null'")
-            last_responses.append(answer_str)
+                print(f"Warning: sample {i: }, len={valid_response_length} {sequences_str} \n has no extracted translation, set to default 'null'")
 
             src_text = data_item.non_tensor_batch["extra_info"]["src"]
             tgt_lang = data_item.non_tensor_batch["extra_info"]["tgt_lang"]
-            recheck_chat = self._build_recheck_prompt(
-                target_lang=tgt_lang, src_text=src_text, pred_text=answer_str
-            )
-            recheck_text = self.tokenizer.apply_chat_template(recheck_chat, add_generation_prompt=True, tokenize=False)
 
+            def recheck_tokenized(answer_str):
+
+                recheck_chat = self._build_recheck_prompt(
+                    target_lang=tgt_lang, src_text=src_text, pred_text=answer_str
+                )
+                recheck_text = self.tokenizer.apply_chat_template(recheck_chat, add_generation_prompt=True, tokenize=False)
+                recheck_prompt_tokenized = self.tokenizer(recheck_text, return_tensors="pt", add_special_tokens=False)
+                return recheck_prompt_tokenized, recheck_text
+
+            recheck_prompt_tokenized, recheck_text = recheck_tokenized(answer_str)
             if i == 0:
                 print(f"Preview:\nanswer_str:\n{answer_str}\nsource text:\n{src_text}\nReCheck prompt example:\n{recheck_text}")
-
-            recheck_prompt_tokenized = self.tokenizer(recheck_text, return_tensors="pt", add_special_tokens=False)
+            if recheck_prompt_tokenized['input_ids'].shape[-1] > self.max_prompt_length:
+                print(f"Warning: sample {i: } recheck prompt length {recheck_prompt_tokenized['input_ids'].shape[-1]} exceeds max_prompt_length {self.max_prompt_length}")
+                recheck_prompt_tokenized, _ = recheck_tokenized("null")
+                answer_str = "null"
             
+            last_responses.append(answer_str)
             x, y = verl_F.postprocess_data(
                 input_ids=recheck_prompt_tokenized['input_ids'],
                 attention_mask=recheck_prompt_tokenized['attention_mask'],

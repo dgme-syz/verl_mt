@@ -303,7 +303,7 @@ def compute_grpo_outcome_advantage(
     scores = token_level_rewards.sum(dim=-1)
 
     if depth is None:
-        depth = np.zeros_like(index)
+        depth = np.ones_like(index)
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -318,6 +318,8 @@ def compute_grpo_outcome_advantage(
         f"check non zero {sum([not torch.eq(scores[i], 0) for i in range(len(index))])}/{len(index)}\n"
     )
     assert len(index) == len(depth) == len(current_index), "index, current_index and depth must have the same length."
+    
+    merge_fn = max if config.get("grpo_child_score_merge_fn", "max") == "max" else torch.mean
     with torch.no_grad():
         # calculate, and from deep to shallow
         calculate_order = [i for i in range(len(index))]
@@ -326,7 +328,13 @@ def compute_grpo_outcome_advantage(
         current_order = depth[calculate_order[0]]
         current_pos = 0
         max_depth = current_order
-       
+        
+        if config.get("leaf_score_only", False):
+            print("Using leaf score only mode in GRPO advantage computation.")
+            for i in range(len(index)):
+                if depth[i] < max_depth:
+                    scores[i] = 0.0
+
         while current_order >= 1:
             # gather current depth indices
             current_depth_indices = []
@@ -337,6 +345,7 @@ def compute_grpo_outcome_advantage(
                 current_depth_indices.append(calculate_order[current_pos])
                 current_pos += 1
             current_order -= 1
+
             # compute mean and std for current depth
             
             bsz = len(current_depth_indices)
@@ -345,25 +354,26 @@ def compute_grpo_outcome_advantage(
             if depth[current_depth_indices[0]] < max_depth:
                 for i in range(bsz):
                     child_idx = current_index[current_depth_indices[i]]
-                    if child_idx in id2mean:
-                        scores[current_depth_indices[i]] += id2mean[child_idx]
-                        # print(f"Adding child idx {child_idx} mean {id2mean[child_idx]} to sample idx {current_depth_indices[i]}, get score {scores[current_depth_indices[i]]}.")
+                    if child_idx in id2score:
+                        scores[current_depth_indices[i]] += merge_fn(id2score[child_idx])  # use max child score
+                        if i == 0:
+                            print(f"Adding child idx {child_idx} max of {id2score[child_idx]} to sample idx {current_depth_indices[i]}, get score {scores[current_depth_indices[i]]}.")
                     else:
-                        print(f"Warning: child idx {child_idx} not in id2mean, may be current sample is overthinking.")
+                        print(f"Warning: child idx {child_idx} not in id2score, may be current sample is overthinking.")
                     
             for i in range(bsz):
                 id2score[index[current_depth_indices[i]]].append(scores[current_depth_indices[i]])
-            for idx in id2score:
-                if len(id2score[idx]) == 1:
-                    id2mean[idx] = torch.tensor(0.0)
-                    id2std[idx] = torch.tensor(1.0)
-                elif len(id2score[idx]) > 1:
-                    scores_tensor = torch.stack(id2score[idx])
-                    id2mean[idx] = torch.mean(scores_tensor)
-                    id2std[idx] = torch.std(scores_tensor)
-                else:
-                    raise ValueError(f"no score in prompt index: {idx}")
 
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(id2score[idx]) > 1:
+                scores_tensor = torch.stack(id2score[idx])
+                id2mean[idx] = torch.mean(scores_tensor)
+                id2std[idx] = torch.std(scores_tensor)
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
         bsz = scores.shape[0]
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:

@@ -240,6 +240,7 @@ def compute_advantage(
             current_index=data.non_tensor_batch.get("own_uid", None),
             depth=data.non_tensor_batch.get("depth", None),
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
