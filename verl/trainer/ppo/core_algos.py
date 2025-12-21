@@ -271,72 +271,61 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    step:  Optional[int] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute advantage for GRPO, operating only on Outcome reward
-    (with only one scalar reward for each response).
-
-    Args:
-        token_level_rewards: `(torch.Tensor)`
-            shape is (bs, response_length)
-        response_mask: `(torch.Tensor)`
-            shape is (bs, response_length)
-        index: `(np.ndarray)`
-            index array for grouping
-        epsilon: `(float)`
-            small value to avoid division by zero
-        norm_adv_by_std_in_grpo: `(bool)`
-            whether to scale the GRPO advantage
-        config: `(Optional[AlgoConfig])`
-            algorithm configuration object
-
-    Note:
-        If norm_adv_by_std_in_grpo is True, the advantage is scaled by the std, as in the original GRPO.
-        If False, the advantage is not scaled, as in Dr.GRPO (https://arxiv.org/abs/2503.20783).
-
-    Returns:
-        advantages: `(torch.Tensor)`
-            shape is (bs, response_length)
-        Returns: `(torch.Tensor)`
-            shape is (bs, response_length)
-    """
     scores = token_level_rewards.sum(dim=-1)
 
     if depth is None:
         depth = np.ones_like(index)
 
     id2score = defaultdict(list)
-    id2mean = {}
-    id2std = {}
+    id2multiroll = defaultdict(list)
+    propagation = defaultdict(list)
+    id2mean, id2std = {}, {}
+    assert len(scores) >= 10
     print(
         f"Computing GRPO advantage...\n\n"
         f"index: {index[:10]}\n"
-        f"current_index: {current_index[:10]}\n"
+        f"current_index: {current_index[:10] if current_index is not None else None}\n"
         f"depth: {depth[:10]}\n"
         f"scores: {scores[:10]}\n"
         f"scores[0]: {scores[0]}\n"
-        f"check non zero {sum([not torch.eq(scores[i], 0) for i in range(len(index))])}/{len(index)}\n"
+        f"check non zero "
+        f"{sum([not torch.eq(scores[i], 0) for i in range(len(index))])}/{len(index)}\n"
     )
-    assert len(index) == len(depth) == len(current_index), "index, current_index and depth must have the same length."
-    
-    merge_fn = max if config.get("grpo_child_score_merge_fn", "max") == "max" else torch.mean
+
+    assert len(index) == len(depth), (
+        "index, current_index and depth must have the same length."
+    )
+    merge_fn = (
+        torch.max
+        if config.get("grpo_child_score_merge_fn", "max") == "max"
+        else torch.mean
+    )
+
     with torch.no_grad():
-        # calculate, and from deep to shallow
-        calculate_order = [i for i in range(len(index))]
-        # sort
+        calculate_order = list(range(len(index)))
         calculate_order.sort(key=lambda x: -depth[x])
+
         current_order = depth[calculate_order[0]]
         current_pos = 0
         max_depth = current_order
-        
+
+        scores_add = torch.zeros_like(scores)
+
         if config.get("leaf_score_only", False):
             print("Using leaf score only mode in GRPO advantage computation.")
             for i in range(len(index)):
                 if depth[i] < max_depth:
                     scores[i] = 0.0
 
+        scale_x = config.get("qe_weight", 1.0)
+        scale_y = config.get("merge_weight", 1.0) 
+        if step >= 51 and config.get("remove_runtime_qe", False):
+            print("Step > 51, so make scale = 0.0")
+            scale_x = 0
+
         while current_order >= 1:
-            # gather current depth indices
             current_depth_indices = []
             while (
                 current_pos < len(calculate_order)
@@ -344,26 +333,42 @@ def compute_grpo_outcome_advantage(
             ):
                 current_depth_indices.append(calculate_order[current_pos])
                 current_pos += 1
+
             current_order -= 1
-
-            # compute mean and std for current depth
-            
             bsz = len(current_depth_indices)
-            # print(f"Current depth indices: {current_depth_indices}")
-            # add child scores
-            if depth[current_depth_indices[0]] < max_depth:
+            if depth[current_depth_indices[0]] < max_depth and current_index is not None:
                 for i in range(bsz):
-                    child_idx = current_index[current_depth_indices[i]]
-                    if child_idx in id2score:
-                        scores[current_depth_indices[i]] += merge_fn(id2score[child_idx])  # use max child score
-                        if i == 0:
-                            print(f"Adding child idx {child_idx} max of {id2score[child_idx]} to sample idx {current_depth_indices[i]}, get score {scores[current_depth_indices[i]]}.")
-                    else:
-                        print(f"Warning: child idx {child_idx} not in id2score, may be current sample is overthinking.")
-                    
-            for i in range(bsz):
-                id2score[index[current_depth_indices[i]]].append(scores[current_depth_indices[i]])
+                    idx = current_depth_indices[i]
+                    child_idx = current_index[idx]
+                    if child_idx in propagation:
+                        vals = [
+                            t for t in propagation[child_idx]
+                            if t.item() > 0
+                        ]
 
+                        scores_add[idx] = merge_fn(torch.stack(vals)) if vals else scores[idx].clone()
+                        id2multiroll[index[idx]].append(
+                            {"task_reward": scores[idx].item(), "sum": (scale_x * scores[idx] + scale_y * scores_add[idx]).item(), "propagation": vals}
+                        )
+
+                        if i == 0:
+                            print(
+                                f"Adding child idx {child_idx} max of "
+                                f"{propagation[child_idx]} to sample idx {idx}, "
+                                f"get score {scores[idx]}."
+                            )
+                    else:
+                        pass
+            for i in range(bsz):
+                idx = current_depth_indices[i]
+
+                propagation[index[idx]].append(
+                    scores_add[idx].clone() if depth[idx] != max_depth else scores[idx].clone()
+                )
+
+                id2score[index[idx]].append(
+                    scores[idx] + scores_add[idx]
+                )
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -373,16 +378,30 @@ def compute_grpo_outcome_advantage(
                 id2mean[idx] = torch.mean(scores_tensor)
                 id2std[idx] = torch.std(scores_tensor)
             else:
-                raise ValueError(f"no score in prompt index: {idx}")
+                raise ValueError(f"No score in prompt index: {idx}")
+        scores = scale_x * scores + scale_y * scores_add
+        print(scores[:10])
+        for key, li in id2multiroll.items():
+            print(f"\nGroup {key} ({len(li)} rolls)")
+            for i, entry in enumerate(li):
+                print(f"  Roll {i}:")
+                print(f"    task_reward = {entry['task_reward']}")
+                print(f"    sum = {entry['sum']}")
+                print(f"    propagation = {entry['propagation']}")
         bsz = scores.shape[0]
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                scores[i] = (
+                    (scores[i] - id2mean[index[i]])
+                    / (id2std[index[i]] + epsilon)
+                )
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
+
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
 
 
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)

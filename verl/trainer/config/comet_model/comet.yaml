@@ -11,6 +11,6 @@ model:
 model_dict:
   wmt23-cometkiwi-da-xl: Unbabel/wmt23-cometkiwi-da-xl
 # ppo_mini_batch_size: 128
-forward_micro_batch_size: 96
+forward_micro_batch_size: 144
 ulysses_sequence_parallel_size: 1 # sp size
 use_dynamic_bsz: false

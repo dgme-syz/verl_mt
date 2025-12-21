@@ -6,3 +6,4 @@ reward_kwargs:
   # if not use, format_reward will not be used 
   reward_metric: Merge
   mul_times: 2
+  thinking_check: true

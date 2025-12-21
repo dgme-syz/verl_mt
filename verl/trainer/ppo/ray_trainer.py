@@ -239,6 +239,7 @@ def compute_advantage(
             index=data.non_tensor_batch["uid"],
             current_index=data.non_tensor_batch.get("own_uid", None),
             depth=data.non_tensor_batch.get("depth", None),
+            step=data.meta_info.get("global_steps", None),
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             config=config,
         )
@@ -568,17 +569,7 @@ class RayPPOTrainer:
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
 
-            # Store original inputs
-            input_ids = test_batch.batch["input_ids"]
-            # TODO: Can we keep special tokens except for padding tokens?
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            sample_inputs.extend(input_texts)
-            sample_uids.extend(test_batch.non_tensor_batch["uid"])
-
-            ground_truths = [
-                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
-            ]
-            sample_gts.extend(ground_truths)
+            
 
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
@@ -601,29 +592,56 @@ class RayPPOTrainer:
             if not self.async_rollout_mode:
                 print(f"Preview of padded test generation batch:\n\n {test_gen_batch_padded[0]}")
                 mt_workflow.set(test_gen_batch_padded, self.actor_rollout_wg)
-                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True, pad_size=pad_size)
             else:
                 print(f"Preview of padded test generation batch:\n\n {test_gen_batch_padded[0]}")
                 mt_workflow.set(test_gen_batch_padded, self.async_rollout_manager)
-                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True)
+                test_output_gen_batch_padded = mt_workflow.work(repeat_times=1, concat=False, test=True, pad_size=pad_size)
+
+            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
             # unpad
             if self.use_comet:
+                comet_size_divisor = (
+                    self.actor_rollout_wg.world_size
+                    if not self.async_rollout_mode
+                    else self.config.actor_rollout_ref.rollout.agent.num_workers
+                )
+                print(f"Before pad, test output gen batch length: {len(test_output_gen_batch)}")
+                test_output_gen_batch, comet_pad_size = pad_dataproto_to_divisor(test_output_gen_batch, comet_size_divisor)
                 for i in range(len(self.comet_wg_list)):
                     model_name = list(self.config.comet_model.model_dict.items())[i][0]
-                    comet_reward = self.comet_wg_list[i].compute_valid_comet(test_output_gen_batch_padded)
-                    comet_reward = unpad_dataproto(comet_reward, pad_size=pad_size)
+                    comet_reward = self.comet_wg_list[i].compute_valid_comet(test_output_gen_batch)
+                    comet_reward = unpad_dataproto(comet_reward, pad_size=comet_pad_size)
+                    print(f"Unpad, Comet model {model_name} length: {len(comet_reward)}")
                     comet_reward_tensor = comet_reward.batch[f'{model_name}_valid']
                     comet_scores = comet_reward_tensor.sum(-1).cpu().tolist()
                     reward_extra_infos_dict[f'{model_name}_valid'].extend(comet_scores)
 
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=comet_pad_size)
             print("validation generation end")
+
+            # Store original inputs
+            input_ids = test_output_gen_batch.batch["input_ids"]
+            # TODO: Can we keep special tokens except for padding tokens?
+            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+            sample_inputs.extend(input_texts)
+            sample_uids.extend(test_output_gen_batch.non_tensor_batch["uid"])
+
+            ground_truths = [
+                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_output_gen_batch
+            ]
+            sample_gts.extend(ground_truths)
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
+            n = (len(test_output_gen_batch.batch) + len(test_batch.batch) - 1) // len(test_batch.batch)
+                    
+            test_batch = test_batch.repeat(repeat_times=n, interleave=True)
+            if len(test_batch.batch) != len(test_output_gen_batch.batch):
+                test_batch = test_batch[list(range(len(test_output_gen_batch.batch)))]
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -1282,6 +1300,7 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
+                        batch.meta_info["global_steps"] = self.global_steps
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,

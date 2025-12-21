@@ -2,31 +2,47 @@ import re
 from typing import Optional, Tuple, List
 import sacrebleu
 
-def compute_bleu(lang_pair: str, reference: str, prediction: str) -> float:
-    """Compute BLEU score for a given language pair using sacrebleu."""
-    prediction = prediction if isinstance(prediction, str) else ""
-    src_lang, tgt_lang = lang_pair.split("-")
+# -----------------------
+# Logger setup
+# -----------------------
+class PrintLogger:
+    def info(self, *args, **kwargs): 
+        print(*args, **kwargs)
 
-    tokenize = "zh" if tgt_lang == "zh" else "ja-mecab" if tgt_lang == "ja" else "13a"
-    bleu = sacrebleu.corpus_bleu([prediction], [[reference]], tokenize=tokenize)
-    bleu_score = bleu.score
+    def warning(self, *args, **kwargs): 
+        print("[WARNING]", *args, **kwargs)
 
-    return bleu_score
+    def error(self, *args, **kwargs): 
+        print("[ERROR]", *args, **kwargs)
 
+    def critical(self, *args, **kwargs): 
+        print("[CRITICAL]", *args, **kwargs)
 
+class NullLogger:
+    def info(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+    def critical(self, *args, **kwargs): pass
+
+logger = PrintLogger()
+# -----------------------
+# Constants
+# -----------------------
+AGGLUTINATIVE_LANGS = {
+    "tr", "fi", "et", "hu", "uz", "az", "ba", "tt", "ja", "ko"
+}
+
+# -----------------------
+# Helper functions
+# -----------------------
 def extract_solution(text: str) -> str:
-    """Extract the final translated segment from model output.
-    
-    Removes <think>...</think> blocks if present.
-    """
     processed = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     return processed.strip()
 
 
-def validate_response_structure(response: str) -> bool:
-    """Validate that the response follows the required tag structure."""
-    print("\n" + "=" * 60)
-    print(" Structure Validation ".center(60, "="))
+def validate_response_structure(response: str, logger_obj=logger) -> bool:
+    logger_obj.info("\n" + "=" * 60)
+    logger_obj.info(" Structure Validation ".center(60, "="))
 
     tags = {"think_start": "<think>", "think_end": "</think>"}
     validation_passed = True
@@ -37,24 +53,62 @@ def validate_response_structure(response: str) -> bool:
         pos = response.find(tag)
         positions[name] = pos
         status = "OK" if count == 1 else "ERROR"
-        print(f"  {tag:12} | count={count:2} | position={pos:4} | {status}")
-
+        logger_obj.info(f"  {tag:12} | count={count:2} | position={pos:4} | {status}")
         if count != 1:
             validation_passed = False
 
     if any(positions[k] == -1 for k in positions):
-        print("  [Error] Missing required tags.")
+        logger_obj.info("  [Error] Missing required tags.")
         return False
 
     if not (positions["think_start"] < positions["think_end"]):
-        print("  [Error] Invalid tag sequence: <think> must come before </think>")
+        logger_obj.info("  [Error] Invalid tag sequence: <think> must come before </think>")
         validation_passed = False
     else:
-        print("  Tag sequence order: OK")
-        pass
+        logger_obj.info("  Tag sequence order: OK")
 
-    print("=" * 60 + "\n")
+    logger_obj.info("=" * 60 + "\n")
     return validation_passed
+
+
+def compute_metric(lang_pair: str, reference: str, prediction: str) -> Tuple[float, str]:
+    prediction = prediction if isinstance(prediction, str) else ""
+    src_lang, tgt_lang = lang_pair.split("-")
+
+    if tgt_lang in AGGLUTINATIVE_LANGS:
+        chrfpp = sacrebleu.corpus_chrf([prediction], [[reference]], word_order=2)
+        return chrfpp.score, "chrF++"
+
+    tokenize = "zh" if tgt_lang == "zh" else "ja-mecab" if tgt_lang == "ja" else "13a"
+    bleu = sacrebleu.corpus_bleu([prediction], [[reference]], tokenize=tokenize)
+    return bleu.score, "BLEU"
+
+
+# -----------------------
+# Compute score functions
+# -----------------------
+def compute_score_val_bleu(
+    solution_str: str,
+    ground_truth: str,
+    lang_pair: str,
+    print_ok: bool = True
+) -> float:
+    """Compute BLEU score for validation samples (without reward logic)."""
+    logger_obj = logger if print_ok else NullLogger()
+
+    logger_obj.info("\n" + "=" * 80)
+    logger_obj.info(" Processing Validation Sample ".center(80, "="))
+
+    answer_text = extract_solution(solution_str)
+    logger_obj.info(f"\n[Prompt + Response]\n{solution_str}")
+
+    score, mode = compute_metric(lang_pair, ground_truth, answer_text or "")
+    logger_obj.info(f"Reference: {ground_truth}")
+    logger_obj.info(f"Hypothesis: {answer_text}")
+    logger_obj.info("\n" + "-" * 80)
+    logger_obj.info(f"{mode} Score: {score}")
+
+    return score
 
 
 def compute_score(
@@ -67,58 +121,55 @@ def compute_score(
     translation_raw: str,
     mul_times: int = 2,
     scale_factor: float = 100.0,
+    thinking_check: bool = True,
+    print_ok: bool = False,
 ) -> float:
     """Compute total reward score based on model output and ground truth."""
-    print("\n" + "=" * 80)
-    print(" Processing Training Sample ".center(80, "="))
+    logger_obj = logger if print_ok else NullLogger()
 
-    # Validate original output
-    format_correct = validate_response_structure(solution_str)
+    logger_obj.info("\n" + "=" * 80)
+    logger_obj.info(" Processing Training Sample ".center(80, "="))
 
-    # Extract final answer
-    processed = extract_solution(solution_str)
-    answer_text = processed.strip()
+    format_correct = validate_response_structure(solution_str, logger_obj) if thinking_check else True
+    answer_text = extract_solution(solution_str)
 
-    print("\n" + "-" * 60)
-    print(" Sample Info ".center(60, "-"))
+    logger_obj.info("\n" + "-" * 60)
+    logger_obj.info(" Sample Info ".center(60, "-"))
     if translation_raw is None:
-        print("[INFO] Stage 1 sample (no raw translation available).")
+        logger_obj.info("[INFO] Stage 1 sample (no raw translation available).")
     else:
         min_score = min(metric_scores) if metric_scores else None
-        if answer_text == translation_raw and min_score < 82:
-            print(f"[Answer]        {answer_text}")
-            print(f"[Last Output]   {translation_raw}")
-            print(f"[Min Comet]     {min_score}")
-            print(f"[Answer==Raw]   {answer_text == translation_raw}")
-            print(f"[Length]        answer={len(answer_text)}, raw={len(translation_raw)}")
-            print("[INFO] Low-quality duplicate, giving 0.0 score.")
+        if answer_text == translation_raw and min_score < 80:
+            logger_obj.info(f"[Answer]        {answer_text}")
+            logger_obj.info(f"[Last Output]   {translation_raw}")
+            logger_obj.info(f"[Min Comet]     {min_score}")
+            logger_obj.info(f"[Answer==Raw]   {answer_text == translation_raw}")
+            logger_obj.info(f"[Length]        answer={len(answer_text)}, raw={len(translation_raw)}")
+            logger_obj.info("[INFO] Low-quality duplicate, giving 0.0 score.")
             return 0.0
-    print("-" * 60 + "\n")
+    logger_obj.info("-" * 60 + "\n")
 
-    # Show prompt + response
-    print(" Prompt + Model Output ".center(80, "-"))
-    print(prompt_str + solution_str)
-    print("-" * 80 + "\n")
+    logger_obj.info(" Prompt + Model Output ".center(80, "-"))
+    logger_obj.info(prompt_str + solution_str)
+    logger_obj.info("-" * 80 + "\n")
 
     if not (format_correct and answer_text):
-        print("[Content Validation] Skipped due to format error or empty answer.")
-        print(
+        logger_obj.info("[Content Validation] Skipped due to format error or empty answer.")
+        logger_obj.info(
             f"[ERROR]-----details\n"
             f"[prompt_str + solution_str]: {prompt_str + solution_str}\n"
             f"[response]: {solution_str}\n"
         )
-        return 0.0
+        return -1.0
 
-    # Compute BLEU score
-    bleu_score = compute_bleu(lang_pair, ground_truth, answer_text)
+    sentence_score, mode = compute_metric(lang_pair, ground_truth, answer_text)
     answer_score = 0.0
 
     def scale(val: float) -> float:
         return val / scale_factor
 
-    # Reward computation
-    if reward_metric == "BLEU":
-        answer_score = scale(bleu_score)
+    if reward_metric == "Sentence":
+        answer_score = scale(sentence_score)
     elif reward_metric == "Model":
         if metric_scores is None:
             raise ValueError("metric_scores is None; expected model score.")
@@ -126,53 +177,57 @@ def compute_score(
     elif reward_metric == "Merge":
         if metric_scores is None:
             raise ValueError("metric_scores is None; expected model score.")
-        answer_score = scale(bleu_score + sum(metric_scores))
+        answer_score = scale(sentence_score + sum(metric_scores))
     else:
         raise ValueError(f"Invalid reward_metric type: {reward_metric}")
 
-    # Print content validation
-    print("\n" + "=" * 60)
-    print(" Content Validation ".center(60, "="))
-    print(f"Reference      : {ground_truth}")
-    print(f"Hypothesis     : {answer_text}")
-    print(f"BLEU           : {bleu_score:.2f}")
+    logger_obj.info("\n" + "=" * 60)
+    logger_obj.info(" Content Validation ".center(60, "="))
+    logger_obj.info(f"Reference      : {ground_truth}")
+    logger_obj.info(f"Hypothesis     : {answer_text}")
+    logger_obj.info(f"{mode}           : {sentence_score:.2f}")
     if metric_scores is not None:
-        print(f"Model Score(s) : {metric_scores}")
-    print("=" * 60)
+        logger_obj.info(f"Model Score(s) : {metric_scores}")
+    logger_obj.info("=" * 60)
 
-    # Total score
-    total_score = pow(answer_score, mul_times)
-    print("\n" + "-" * 60)
-    print(" Reward Breakdown ".center(60, "-"))
-    print(f"  Answer Score : {answer_score:.4f}")
-    print(f"  Total Score  : {total_score:.4f}")
-    print("-" * 60 + "\n")
+    total_score = pow(answer_score, mul_times) if mul_times != 1 else answer_score
+
+    logger_obj.info("\n" + "-" * 60)
+    logger_obj.info(" Reward Breakdown ".center(60, "-"))
+    logger_obj.info(f"  Answer Score : {answer_score:.4f}")
+    logger_obj.info(f"  Total Score  : {total_score:.4f}")
+    logger_obj.info("-" * 60 + "\n")
+
     return total_score
 
-
-
-def compute_score_val_bleu(
-    solution_str: str,
-    ground_truth: str,
-    lang_pair: str,
-) -> float:
-    """Compute BLEU score for validation samples (without reward logic)."""
-
-    answer_text = extract_solution(solution_str)
-
-    bleu_score = compute_bleu(lang_pair, ground_truth, answer_text or "")
-    return bleu_score
-
-def compute_score_corpus_bleu(
+def compute_score_corpus(
     solution_str: list[str],
     ground_truth: list[str],
-    lang_pair: str
-) -> float:
+    lang_pair: str,
+    print_ok: bool = True
+) -> Tuple[float, str]:
+    logger_obj = logger if print_ok else NullLogger()
+
     assert len(solution_str) == len(ground_truth), (
         "The number of translations should be equal to the number of references"
     )
+
     _, tgt_lang = lang_pair.split("-")
-    # Choose tokenizer based on target language
+
+    if tgt_lang in AGGLUTINATIVE_LANGS:
+        logger_obj.info(f"[Info] Target language={tgt_lang} detected as agglutinative. Using chrF++ instead of BLEU.")
+        solution_str = [extract_solution(x) for x in solution_str]
+        if any(x.startswith("<think>") for x in solution_str):
+            logger_obj.info("Warning: Some responses still contain <think> tags after extraction.")
+
+        chrfpp = sacrebleu.corpus_chrf(
+            solution_str,
+            [ground_truth],
+            word_order=2  # chrF++
+        )
+        return chrfpp.score, "chrF++"
+
+    # 设置 tokenizer
     if tgt_lang == "zh":
         tokenizer = "zh"
     elif tgt_lang == "ja":
@@ -181,16 +236,27 @@ def compute_score_corpus_bleu(
         tokenizer = "ko-mecab"
     else:
         tokenizer = "13a"
-    print(
-        f"Preview of responses and references:\nResponse: {solution_str[0]}\nReference: {ground_truth[0]}"
+
+    logger_obj.info(
+        f"Preview of responses and references:\n"
+        f"Response: {solution_str[0]}\nReference: {ground_truth[0]}"
     )
+
     solution_str = [extract_solution(x) for x in solution_str]
     if any(x.startswith("<think>") for x in solution_str):
-        print("Warning: Some responses still contain <think> tags after extraction.")
-    result = sacrebleu.corpus_bleu(
+        logger_obj.info("Warning: Some responses still contain <think> tags after extraction.")
+        c = 0
+        for i in range(len(solution_str)):
+            if solution_str[i].startswith("<think>"):
+                solution_str[i] = "null"  # set null for fair BLEU
+                c += 1
+        print(f"We have {c} null samples")
+
+    bleu = sacrebleu.corpus_bleu(
         solution_str,
         [ground_truth],
         tokenize=tokenizer,
         force=True,
     )
-    return result.score
+
+    return bleu.score, "BLEU"

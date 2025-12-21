@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import Any
 
 import torch
@@ -19,7 +19,7 @@ import torch
 from verl import DataProto
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
-from verl.utils.reward_score.mt_score import compute_score_val_bleu, compute_score_corpus_bleu
+from verl.utils.reward_score.mt_score import compute_score_corpus, compute_score_val_bleu
 
 @register("mt_train")
 class MtTrainRewardManager(AbstractRewardManager):
@@ -45,6 +45,7 @@ class MtTrainRewardManager(AbstractRewardManager):
         self.num_examine = num_examine
         self.compute_score = compute_score
         self.reward_fn_key = reward_fn_key
+        self.print_num = 20
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """Compute MT rewards for each sample in the batch."""
@@ -53,6 +54,7 @@ class MtTrainRewardManager(AbstractRewardManager):
                 "MT reward model score combination not supported; use BLEU or COMET scores instead."
             )
 
+        count = Counter()
         reward_tensor = torch.zeros(
             data.batch["responses"].shape,
             dtype=torch.float32,
@@ -80,6 +82,7 @@ class MtTrainRewardManager(AbstractRewardManager):
             )
 
             non_tensor = data_item.non_tensor_batch
+            depth = non_tensor.get("depth", 1)
             ground_truth = non_tensor["reward_model"]["ground_truth"]
             data_source = non_tensor[self.reward_fn_key]
             translation_raw = non_tensor["last_response"] if non_tensor.get("last_response", None) else None
@@ -89,6 +92,7 @@ class MtTrainRewardManager(AbstractRewardManager):
                 float(v) for k, v in data_item.batch.items() if k.endswith("_comet_score")
             ]
 
+            count[depth] += 1
             # --- Compute reward ---
             score = self.compute_score(
                 metric_scores=metric_scores,
@@ -96,7 +100,8 @@ class MtTrainRewardManager(AbstractRewardManager):
                 prompt_str=prompt_str,
                 solution_str=response_str,
                 ground_truth=ground_truth,
-                translation_raw=translation_raw
+                translation_raw=translation_raw,
+                print_ok=count[depth] <= self.print_num,
             )
             printed_data_sources.setdefault(data_source, 0)
             if printed_data_sources[data_source] < self.num_examine:
@@ -153,8 +158,9 @@ class MtValRewardManager(AbstractRewardManager):
         # if rewardmanager can use settings from config, it is easy
         # now we use custom func args to control score caclulation's params in training
         self.compute_score = compute_score_val_bleu 
-        self.compute_corpus_bleu = compute_score_corpus_bleu
+        self.compute_corpus_bleu = compute_score_corpus
         self.reward_fn_key = reward_fn_key
+        self.print_num = 20
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """Compute validation BLEU or other metric-based reward."""
@@ -173,8 +179,11 @@ class MtValRewardManager(AbstractRewardManager):
 
         sol = defaultdict(list)
         ref = defaultdict(list)
+        idx = defaultdict(list)
 
         global_lang_pair = None
+
+        count = Counter()
         for i, data_item in enumerate(data):
             prompt_ids = data_item.batch["prompts"]
             response_ids = data_item.batch["responses"]
@@ -192,6 +201,7 @@ class MtValRewardManager(AbstractRewardManager):
             )
 
             non_tensor = data_item.non_tensor_batch
+            depth = non_tensor.get("depth", 1)
             ground_truth = non_tensor["reward_model"]["ground_truth"]
             data_source = non_tensor[self.reward_fn_key]
             lg_pair = f"{non_tensor['extra_info']['src_lang']}-{non_tensor['extra_info']['tgt_lang']}"
@@ -200,11 +210,15 @@ class MtValRewardManager(AbstractRewardManager):
 
             sol[data_source].append(response_str)
             ref[data_source].append(ground_truth)
+            idx[data_source].append(i)
+
+            count[depth] += 1
 
             score = self.compute_score(
                 solution_str=response_str,
                 ground_truth=ground_truth,
                 lang_pair=lg_pair,
+                print_ok=count[depth] <= self.print_num,
             )
 
             if not isinstance(score, dict):
@@ -235,16 +249,20 @@ class MtValRewardManager(AbstractRewardManager):
             for data_source in sol.keys():
                 sol_list = sol[data_source]
                 ref_list = ref[data_source]
-                corpus_bleu_score = self.compute_corpus_bleu(
+                corpus_score, mode = self.compute_corpus_bleu(
                     solution_str=sol_list,
                     ground_truth=ref_list,
-                    lang_pair=global_lang_pair
+                    lang_pair=global_lang_pair,
+                    print_ok=True
                 )
-                reward_extra_info[f"corpus_bleu_{data_source}"] = [corpus_bleu_score] * len(data.batch)
-                print(f"[corpus_bleu_score - {data_source}]", corpus_bleu_score)
+                if len(reward_extra_info[f"corpus_{mode}"]) == 0:
+                    reward_extra_info[f"corpus_{mode}"] = [0 for _ in range(len(data))]
+
+                for i in idx[data_source]:
+                    reward_extra_info[f"corpus_{mode}"][i] = corpus_score
+
+                print(f"[corpus_{mode}_score - {data_source}]", corpus_score)
 
         return (
-            {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
-            if return_dict
-            else reward_tensor
+            {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info} if return_dict else reward_tensor
         )

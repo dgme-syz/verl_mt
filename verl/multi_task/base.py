@@ -4,17 +4,113 @@ import re
 import uuid
 import copy
 import textwrap
+import random
 
 import numpy as np
 import torch
 from transformers import PreTrainedTokenizerBase
 
 from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.fs import copy_to_local
 from verl.utils import hf_tokenizer
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
+ 
 
+
+
+LANG_DICT = {
+    "en": "English", "zh": "Chinese (Simplified)", "hu": "Hungarian", "es": "Spanish", "fr": "French", "de": "German", "ru": "Russian", "ja": "Japanese", "th": "Thai", "sw": "Swahili", "bn": "Bengali", "te": "Telugu", "ar": "Arabic", "ko": "Korean", "vi": "Vietnamese", "cs": "Czech", "sr": "Cyrillic Serbian"
+}
+
+LANG_DICT.update({
+    "ha": "Hausa",
+    "om": "Oromo",
+    "so": "Somali",
+    "am": "Amharic",
+    "he": "Hebrew",
+    "mt": "Maltese",
+    "km": "Khmer",
+    "jv": "Javanese",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "mi": "Maori",
+    "ceb": "Cebuano",
+    "tl": "Tagalog",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "ta": "Tamil",
+    "hy": "Armenian",
+    "lt": "Lithuanian",
+    "lv": "Latvian",
+    "be": "Belarusian",
+    "bg": "Bulgarian",
+    "bs": "Bosnian",
+    "hr": "Croatian",
+    "mk": "Macedonian",
+    "pl": "Polish",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "uk": "Ukrainian",
+    "cy": "Welsh",
+    "ga": "Irish",
+    "is": "Icelandic",
+    "sv": "Swedish",
+    "da": "Danish",
+    "no": "Norwegian",
+    "af": "Afrikaans",
+    "lb": "Luxembourgish",
+    "nl": "Dutch",
+    "el": "Greek",
+    "as": "Assamese",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sd": "Sindhi",
+    "ur": "Urdu",
+    "fa": "Persian",
+    "ku": "Kurdish",
+    "ps": "Pashto",
+    "tg": "Tajik",
+    "ast": "Asturian",
+    "ca": "Catalan",
+    "gl": "Galician",
+    "it": "Italian",
+    "oc": "Occitan",
+    "pt": "Portuguese",
+    "ro": "Romanian",
+    "ka": "Georgian",
+    "lo": "Lao",
+    "mn": "Mongolian",
+    "wo": "Wolof",
+    "ln": "Lingala",
+    "ns": "Northern Sotho",
+    "lg": "Luganda",
+    "ny": "Nyanja",
+    "sn": "Shona",
+    "umb": "Umbundu",
+    "xh": "Xhosa",
+    "yo": "Yoruba",
+    "zu": "Zulu",
+    "ig": "Igbo",
+    "kam": "Kamba",
+    "ff": "Fulani",
+    "luo": "Dholuo",
+    "kea": "Kabuverdianu",
+    "zhtrad": "Traditional Chinese",
+    "my": "Burmese",
+    "uz": "Uzbek",
+    "kk": "Kazakh",
+    "ky": "Kyrgyz",
+    "az": "Azerbaijani",
+    "tr": "Turkish",
+    "et": "Estonian",
+    "fi": "Finnish",
+})
 
 class MultiTaskWorkflow(ABC):
     """Abstract base class for defining multi-task workflows."""
@@ -53,6 +149,12 @@ class MTWorkflow(MultiTaskWorkflow):
         self.repeat_times = self.config.workflow.get("repeat_times")
         self.max_prompt_length = self.config.data.get("max_prompt_length", 1024)
         self.truncation = self.config.data.get("truncation", "error")
+        self.use_test_prompt = self.config.workflow.get("use_test_prompt", False)
+        self.mt_only = self.config.workflow.get("mt_only", False)
+        self.test_mt_only = self.config.workflow.get("test_mt_only", False)
+        self.local_steps = 0
+        self.data_divisor = self.config.workflow.get("data_divisor", 1)
+        self.dynamic_mode = self.config.workflow.get("dynamic_mode", False)
 
     @staticmethod
     def _extract_translation(solution_str: str) -> str | None:
@@ -63,8 +165,7 @@ class MTWorkflow(MultiTaskWorkflow):
         processed_str = re.sub(r"<think>.*?</think>", "", solution_str, flags=re.DOTALL).strip()
         return processed_str if "<think>" not in processed_str else None
 
-    @staticmethod
-    def _build_recheck_prompt(target_lang: str, src_text: str, pred_text: str) -> List[Dict[str, str]]:
+    def _build_recheck_prompt(self, target_lang: str, src_text: str, pred_text: str) -> List[Dict[str, str]]:
         """Builds the prompt for the recheck/refinement step."""
         prompts = {
             "zh": textwrap.dedent(
@@ -103,16 +204,55 @@ class MTWorkflow(MultiTaskWorkflow):
                 Please return only the final refined translation text, without any additional content.
                 """
             ).strip(),
-        }
+            "fi": textwrap.dedent(
+                f"""
+                Kun sinulle annetaan lähdeteksti: '{src_text}' ja sen käännösluonnos: '{pred_text}',
+                sinun tulee ensin ymmärtää lähdeteksti ja sen jälkeen muokata ja viimeistellä luonnosta
+                seuraavien periaatteiden mukaisesti.
 
+                1. Käännösluonnoksessa saattaa olla puutteita; älä jätä pois mitään alkutekstin merkitystä.
+                2. Varmista, että käännetty teksti on sujuvaa, luonnollista ja ihmisen tapaista; voit tarvittaessa
+                   muuttaa virkkeen sanajärjestystä.
+                3. Kiinnitä erityistä huomiota kontekstiin ja valitse tilanteeseen sopiva tyyli, olipa se sitten
+                   kirjakielinen tai puhekielisempi.
+                4. Tarkista jokaisen sanan merkitys ja varmista, että se sopii sekä lauseyhteyteen että todelliseen maailmaan.
+                5. Tarkista jokaisen virkkeen merkitys ja varmista, että se vastaa koko kontekstia ja todellisuutta.
+                6. Muista, että viimeisteltävä kohde on käännösluonnos, ei alkuperäinen lähdeteksti.
+                7. Jos jokin kohta tuntuu epäselvältä, palaa lähdetekstiin ja mieti sitä uudelleen.
+                8. Jos käännösluonnos ei ole kiinaksi, varmista että viimeistelty tekstisi on kiinankielinen.
+                9. Huolehdi siitä, ettet jätä pois alkutekstin merkityksiä, älä lisää ylimääräistä sisältöä
+                   äläkä käytä ylenpalttisia vertauksia käännöksessä.
+                10. Voit näyttää ajatteluprosessin, mutta älä jatka sitä loputtomiin; lopullisessa vastauksessa
+                    tulee olla vain viimeistelemäsi teksti.
+
+                Palauta lopuksi vain viimeistelty käännöksesi, älä mitään ylimääräistä.
+                """
+            ).strip(),
+            "test": textwrap.dedent(
+                f"""
+                Given the source text: 
+                
+                {src_text}
+                
+                Improve the following draft {LANG_DICT.get(target_lang, target_lang)} translation into a high-quality {LANG_DICT.get(target_lang, target_lang)} version, without explanations:
+
+                {pred_text}
+                """
+            ).strip(),
+        }
+        
         lang_key = next((key for key in prompts if key in target_lang), None)
         if lang_key is None:
-            raise ValueError(f"Unsupported target language: {target_lang}. Supported: {list(prompts.keys())}")
+            if not self.use_test_prompt:
+                raise ValueError(f"Unsupported target language: {target_lang}. Supported: {list(prompts.keys())}")
+
+        if self.use_test_prompt:
+            lang_key = "test"
 
         return [{"role": "user", "content": prompts[lang_key]}]
 
     def _prepare_recheck_inputs(
-        self, gen_batch_output: DataProto
+        self, gen_batch_output: DataProto, repeat_times: int = 1
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str], List[int]]:
         """
         Process the initial generation output to prepare inputs for the recheck step.
@@ -121,22 +261,36 @@ class MTWorkflow(MultiTaskWorkflow):
         input_ids_list, attention_mask_list, position_ids_list = [], [], []
         last_responses, valid_indices = [], []
 
+        uid_list = set()
+        for data_item in gen_batch_output:
+            uid = data_item.non_tensor_batch["uid"]
+            if not isinstance(data_item.non_tensor_batch.get("last_response", None), str):
+                uid_list.add(uid)
+        print(f"Preparing recheck inputs for {len(uid_list)}/{len(gen_batch_output)} unique samples.")
+        # select len(uid_list) // repeat_times valid samples
+        selected_uids = set(random.sample(list(uid_list), max(1, len(uid_list) // repeat_times)))
+
         for i, data_item in enumerate(gen_batch_output):
+            uid = data_item.non_tensor_batch["uid"]
+            if uid not in selected_uids:
+                continue
             prompt_ids = data_item.batch["prompts"]
             prompt_length = prompt_ids.shape[-1]
             response_ids = data_item.batch["responses"]
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
+            if isinstance(data_item.non_tensor_batch.get("last_response", None), str):
+                # fixed data
+                continue
+
             sequences_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             answer_str = self._extract_translation(sequences_str)
 
-            if answer_str and valid_response_length < self.max_prompt_length:
-                valid_indices.append(i)
-            else:
+            valid_indices.append(i)
+            if not answer_str:
                 answer_str = "null"
                 print(f"Warning: sample {i: }, len={valid_response_length} {sequences_str} \n has no extracted translation, set to default 'null'")
-
             src_text = data_item.non_tensor_batch["extra_info"]["src"]
             tgt_lang = data_item.non_tensor_batch["extra_info"]["tgt_lang"]
 
@@ -145,7 +299,7 @@ class MTWorkflow(MultiTaskWorkflow):
                 recheck_chat = self._build_recheck_prompt(
                     target_lang=tgt_lang, src_text=src_text, pred_text=answer_str
                 )
-                recheck_text = self.tokenizer.apply_chat_template(recheck_chat, add_generation_prompt=True, tokenize=False)
+                recheck_text = self.tokenizer.apply_chat_template(recheck_chat, add_generation_prompt=True, tokenize=False, enable_thinking=self.config.data.apply_chat_template_kwargs.get("enable_thinking", True))
                 recheck_prompt_tokenized = self.tokenizer(recheck_text, return_tensors="pt", add_special_tokens=False)
                 return recheck_prompt_tokenized, recheck_text
 
@@ -225,12 +379,25 @@ class MTWorkflow(MultiTaskWorkflow):
         })
         return post_edit_batch
 
-    def work(self, repeat_times: int | None = None, concat: bool = True, test: bool = False) -> DataProto:
+    def work(self, repeat_times: int | None = None, concat: bool = True, test: bool = False, pad_size: int = 0) -> DataProto:
         """Executes the full multi-turn workflow."""
-        repeat_times = repeat_times if repeat_times is not None else self.repeat_times
+        if not test:
+            self.local_steps += 1
+            if self.dynamic_mode and self.local_steps % 51 == 0 and self.data_divisor // 2 >= 1:
+                self.data_divisor = self.data_divisor // 2
+                print(f"Adjusting data_divisor to {self.data_divisor} at local step {self.local_steps}")
 
+        repeat_times = repeat_times if repeat_times is not None else self.repeat_times
         # 1. Initial Generation (MT)
         gen_batch_output = self.actor_rollout_wg.generate_sequences(self.gen_batch_output)
+        if not test:
+            if self.mt_only:
+                return gen_batch_output
+        else:
+            if self.test_mt_only:
+                return gen_batch_output
+            print("Use post edit evaluation mode.")
+
         gen_batch_output.non_tensor_batch["own_uid"] = np.array([str(uuid.uuid4()) for _ in range(len(gen_batch_output.batch))], dtype=object)
         # 2. Prepare for Post-Editing Step
         (
@@ -239,17 +406,17 @@ class MTWorkflow(MultiTaskWorkflow):
             recheck_pos_ids,
             last_responses,
             valid_indices,
-        ) = self._prepare_recheck_inputs(gen_batch_output)
+        ) = self._prepare_recheck_inputs(gen_batch_output[:-pad_size] if pad_size > 0 else gen_batch_output, repeat_times=repeat_times if test else self.data_divisor)
 
         if not test:
             valid_indices = self._align_batch_for_dp(valid_indices, repeat_times)
         else:
-            valid_indices = list(range(len(recheck_input_ids))) # auto pad
+            valid_indices = list(range(len(recheck_input_ids))) 
         # Filter all inputs based on valid indices
-        recheck_input_ids = recheck_input_ids[valid_indices]
-        recheck_attn_mask = recheck_attn_mask[valid_indices]
-        recheck_pos_ids = recheck_pos_ids[valid_indices]
-        filtered_last_responses = [last_responses[i] for i in valid_indices]
+        recheck_input_ids = recheck_input_ids[:len(valid_indices)]
+        recheck_attn_mask = recheck_attn_mask[:len(valid_indices)]
+        recheck_pos_ids = recheck_pos_ids[:len(valid_indices)]
+        filtered_last_responses = last_responses[:len(valid_indices)]
         
         # Build the batch for the post-editing step
         post_edit_batch = self._build_post_edit_batch(
@@ -262,23 +429,42 @@ class MTWorkflow(MultiTaskWorkflow):
         )
 
         # Set metadata for the original generation batch
-        gen_batch_output.non_tensor_batch["depth"] = np.ones(len(gen_batch_output.batch), dtype=np.int32)
-        gen_batch_output.non_tensor_batch["last_response"] = np.full(len(gen_batch_output.batch), None, dtype=object)
+        # update mt_source_name
+        gen_batch_output.non_tensor_batch["data_source"] = np.array(
+            [f"{x}_mt" for x in gen_batch_output.non_tensor_batch["data_source"]], dtype=object
+        )
+        depth = []
+        last_responses = []
+        for x in gen_batch_output:
+            if x.non_tensor_batch.get("last_response", None) is not None:
+                depth.append(2)
+                last_responses.append(x.non_tensor_batch["last_response"])
+            else:
+                depth.append(1)
+                last_responses.append(None)
+        gen_batch_output.non_tensor_batch["depth"] = np.array(depth, dtype=np.int32)
+        gen_batch_output.non_tensor_batch["last_response"] = np.array(last_responses, dtype=object)
 
         print(f"Post-edit batch size (before repeat): {len(post_edit_batch.batch)}")
         print(f"Preview of post-editing:\n{gen_batch_output[:2]}")
         
         # 3. Post-Editing Generation
         post_edit_batch = post_edit_batch.repeat(repeat_times=repeat_times, interleave=True)
-        post_edit_output = self.actor_rollout_wg.generate_sequences(post_edit_batch)
+        size_divisor = self.actor_rollout_wg.world_size
+        if test:
+            print("Two Stage Pad: before, len post edit batch:", len(post_edit_batch.batch))
+            post_edit_batch, pad_size = pad_dataproto_to_divisor(post_edit_batch, size_divisor)
+            print("Two Stage Pad: after, len post edit batch:", len(post_edit_batch.batch))
+            post_edit_output = self.actor_rollout_wg.generate_sequences(post_edit_batch)
+            print("Two Stage Pad: finish, len post edit output:", len(post_edit_output.batch))
+            post_edit_output = unpad_dataproto(post_edit_output, pad_size=pad_size)
+        else:
+            post_edit_output = self.actor_rollout_wg.generate_sequences(post_edit_batch)
         post_edit_output.non_tensor_batch["own_uid"] = np.full(len(post_edit_output.batch), "-1", dtype=object)
 
         # 4. Combine results
-        if concat:
-            gen_batch_output.meta_info.pop("timing", None)
-            final_output = DataProto.concat([gen_batch_output, post_edit_output])
-        else:
-            final_output = post_edit_output
+        gen_batch_output.meta_info.pop("timing", None)
+        final_output = DataProto.concat([post_edit_output, gen_batch_output])
 
         print(f"Final combined batch size: {len(final_output.batch)}")
         return final_output

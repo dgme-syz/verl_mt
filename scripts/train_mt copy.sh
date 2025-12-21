@@ -58,9 +58,7 @@ while true; do
             algorithm.adv_estimator=grpo \
             ++algorithm.leaf_score_only=False \
             ++algorithm.grpo_child_score_merge_fn=mean \
-            ++algorithm.qe_weight=1.0 \
-            ++algorithm.merge_weight=1.0 \
-            ++algorithm.remove_runtime_qe=False \
+            ++algorithm.merge_weight_scale=1.0 \
             data.train_files=$train_file_path \
             data.val_files=$test_file_path \
             data.train_batch_size=$train_batch_size \
@@ -70,8 +68,8 @@ while true; do
             actor_rollout_ref.model.path=$model_path \
             actor_rollout_ref.actor.optim.lr=5e-7 \
             actor_rollout_ref.model.use_remove_padding=True \
-            actor_rollout_ref.actor.ppo_mini_batch_size=96 \
-            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=12 \
+            actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
             actor_rollout_ref.actor.use_kl_loss=False \
             actor_rollout_ref.actor.kl_loss_coef=0.01 \
             actor_rollout_ref.actor.entropy_coeff=0.0 \
@@ -82,7 +80,7 @@ while true; do
             actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=64 \
             actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
             actor_rollout_ref.rollout.name=vllm \
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.92 \
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
             actor_rollout_ref.rollout.n=${rollout_num} \
             actor_rollout_ref.rollout.val_kwargs.top_k=20 \
             actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
@@ -94,12 +92,12 @@ while true; do
             ++reward_model.val_reward_manager="mt_val" \
             ++ray_kwargs.ray_init.ignore_reinit_error=True \
             ++workflow.repeat_times=4 \
-            ++workflow.data_divisor=1 \
+            ++workflow.data_divisor=8 \
             ++workflow.mt_only=False \
 	        ++workflow.test_mt_only=False \
             ++workflow.tokenizer_path=$model_path \
             ++workflow.use_test_prompt=True \
-            ++workflow.dynamic_mode=False \
+            ++workflow.dynamic_mode=True \
             custom_reward_function.reward_kwargs.mul_times=${mul_times} \
             custom_reward_function.reward_kwargs.thinking_check=True \
             trainer.val_before_train=True \

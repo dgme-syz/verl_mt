@@ -17,6 +17,7 @@ Implement a multiprocess PPOCritic
 
 import torch
 import re
+import gc
 
 from verl import DataProto
 from verl.workers.comet import BaseCOMETModel
@@ -38,16 +39,16 @@ class DataParallelCOMET(BaseCOMETModel):
             self.val_batch_size = self.config.get("forward_micro_batch_size", 16)
         print(f"dp_comet.py initialized with val_batch_size: {self.val_batch_size}")
      
-    def _forward_micro_batch(self, micro_batch):
+    def _forward_micro_batch(self, batch, batch_size):
         # response_length = micro_batch['responses'].size(-1)
-
-        batch_size = len(micro_batch)
+        # gc.collect()
+        # gc.collect(2)
         print(f"dp_comet.py forward micro_batch: {batch_size}")
-        comet_output = self.comet_model.predict(micro_batch, batch_size=batch_size, gpus=1)
-        scaled_scores = [round(float(score) * 100, 2) for score in comet_output.scores]
+        comet_output = self.comet_model.predict(batch, batch_size=batch_size, gpus=1)
         
         # return comet_output.scores #for example: [0.84, 0.77, ...]
-        return scaled_scores
+        return [round(float(score) * 100, 2) for score in comet_output.scores]
+        
 
     def extract_translation(self, solution_str: str):
         """
@@ -59,14 +60,11 @@ class DataParallelCOMET(BaseCOMETModel):
         Returns:
             Tuple containing (extracted_answer, processed_string)
         """
-        processed_str = solution_str
         # --- Remove all <think>...</think> blocks ---
-        processed_str = re.sub(r"<think>.*?</think>", "", processed_str, flags=re.DOTALL).strip()
-        return processed_str
+        return re.sub(r"<think>.*?</think>", "", solution_str, flags=re.DOTALL).strip()
 
     def compute_comet_rm(self, data: DataProto) -> torch.Tensor:
-
-        reward_tensor = torch.zeros((len(data.batch['responses']), 1), dtype=torch.float32)
+        gc.collect()
         triplet_list = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -74,16 +72,13 @@ class DataParallelCOMET(BaseCOMETModel):
 
             prompt_length = prompt_ids.shape[-1]
 
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
-            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch['responses']
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            sequences = valid_response_ids
-            sequences_str = self.tokenizer.decode(sequences, skip_special_tokens=True)
+            sequences_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             answer_text = self.extract_translation(sequences_str)
 
             src_text = data_item.non_tensor_batch['extra_info']['src']
@@ -96,22 +91,16 @@ class DataParallelCOMET(BaseCOMETModel):
             triplet_list.append(new_item)
 
         micro_batch_size = data.meta_info['micro_batch_size']
-        micro_batches = [triplet_list[i:i + micro_batch_size] for i in range(0, len(triplet_list), micro_batch_size)]
         # print(f"dp_comet.py compute micro_batches: {micro_batches}")
-        values_lst = []
-        for micro_batch in micro_batches:
-            with torch.no_grad():
-                scores = self._forward_micro_batch(micro_batch)
-            values_lst.extend(scores)
+        with torch.no_grad():
+            scores = self._forward_micro_batch(triplet_list, batch_size=micro_batch_size)
 
-        for i in range(len(data)):
-            reward_tensor[i] = values_lst[i]
+        reward_tensor = torch.tensor(scores, dtype=torch.float32).unsqueeze(1)
 
         return reward_tensor
 
     def compute_valid_comet(self, data: DataProto) -> torch.Tensor:
 
-        reward_tensor = torch.zeros((len(data.batch['responses']), 1), dtype=torch.float32)
         triplet_list = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -125,8 +114,7 @@ class DataParallelCOMET(BaseCOMETModel):
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            sequences = valid_response_ids
-            sequences_str = self.tokenizer.decode(sequences, skip_special_tokens=True)
+            sequences_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             answer_text = self.extract_translation(sequences_str)
 
             src_text = data_item.non_tensor_batch['extra_info']['src']
@@ -135,16 +123,10 @@ class DataParallelCOMET(BaseCOMETModel):
             new_item = {"src":src_text, "mt":answer_text, "ref":tgt_text}
             triplet_list.append(new_item)
 
-        # micro_batches = [triplet_list[i:i + micro_batch_size] for i in range(0, len(triplet_list), micro_batch_size)]
-        micro_batches = [triplet_list[i:i + self.val_batch_size] for i in range(0, len(triplet_list), self.val_batch_size)]
 
-        values_lst = []
-        for micro_batch in micro_batches:
-            with torch.no_grad():
-                scores = self._forward_micro_batch(micro_batch)
-            values_lst.extend(scores)
+        with torch.no_grad():
+            scores = self._forward_micro_batch(triplet_list, batch_size=self.val_batch_size)
 
-        for i in range(len(data)):
-            reward_tensor[i] = values_lst[i]
+        reward_tensor = torch.tensor(scores, dtype=torch.float32).unsqueeze(1)
 
         return reward_tensor

@@ -133,3 +133,6 @@ bs*/
 *.html
 .nfs*
 torchinductor*/
+bs@*/
+qwen3-0.6-mt-zero/
+shenyz_bs@*/
